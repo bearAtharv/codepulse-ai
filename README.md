@@ -11,7 +11,7 @@ CodePulse AI is a GitHub App that automatically reviews pull requests using a co
 | Phase | Description | Status |
 |-------|-------------|--------|
 | **1** | Project skeleton + data model | ✅ Done |
-| **2** | Webhook ingestion service | 🔲 Planned |
+| **2** | Webhook ingestion service | ✅ Done |
 | **3** | AST analysis engine (Python, JS/TS) | 🔲 Planned |
 | **4** | LLM analysis engine (Gemini) | 🔲 Planned |
 | **5** | Aggregation, dedup, GitHub review posting | 🔲 Planned |
@@ -124,7 +124,7 @@ erDiagram
         varchar head_sha
         varchar base_sha
         varchar pr_author
-        varchar status
+        varchar status "pending|fetching|analyzing|posting|completed|failed"
         int total_findings
         boolean reanalysis_needed
         timestamptz webhook_received_at
@@ -138,14 +138,14 @@ erDiagram
         varchar file_path
         int line_start
         int line_end
-        varchar severity
+        varchar severity "critical|high|medium|low|info"
         varchar category
         varchar title
         text explanation
         text suggested_fix
         text remediation
-        varchar confidence
-        varchar source
+        varchar confidence "high|medium|low"
+        varchar source "ast|llm"
         boolean is_posted
         timestamptz created_at
     }
@@ -185,6 +185,8 @@ erDiagram
     }
 ```
 
+The `analysis_runs` table has a unique constraint on `(repository_id, pull_request_number, head_sha)` which serves as a database-level idempotency fallback — even if Redis misses a duplicate, the DB will catch it.
+
 ---
 
 ## What's Implemented
@@ -198,24 +200,56 @@ erDiagram
 - **Pydantic settings** loading all configuration from environment variables
 - **30 unit tests** validating model metadata, constraints, and instantiation
 
+### Phase 2 — Webhook Ingestion Service
+
+- **`POST /webhooks`** endpoint implementing the full ingestion flow:
+  - HMAC-SHA256 signature verification with constant-time comparison
+  - Event filtering (accepts `pull_request` opened/synchronize/reopened; handles `ping`)
+  - Redis-based idempotency (`SET NX` with 1-hour TTL)
+  - Database-level idempotency fallback (`ON CONFLICT DO NOTHING`)
+  - Repository upsert and `analysis_runs` row creation
+  - Celery task enqueue to `cp-high` queue
+- **Health endpoints** (`/health/live`, `/health/ready`)
+- **Celery worker stub** (task defined, actual pipeline wiring is Phase 6)
+- **28 unit tests** covering signatures, filtering, idempotency, task enqueue, and logging
+
 ---
 
 ## Getting Started
 
 ### Prerequisites
 
-- **Docker Desktop** (for PostgreSQL and Redis)
+- **Docker Desktop** (for PostgreSQL, Redis, and the web service)
 - **Python 3.12+** (for running tests locally)
 - **Poetry** (`pip install poetry`)
 
 ### Run the Stack
 
 ```bash
-# Start Postgres + Redis and run migrations
+# Start everything (Postgres + Redis + migration + web service)
 docker compose up --build -d
 
-# Verify the schema
-PYTHONPATH=src python scripts/verify_schema.py
+# Check health
+curl http://localhost:8000/health/live    # → {"status":"alive"}
+curl http://localhost:8000/health/ready   # → {"status":"ready"}
+```
+
+### Test the Webhook Endpoint
+
+```bash
+# Generate a signed payload (using the dev secret)
+SECRET="dev_webhook_secret_not_for_production"
+PAYLOAD='{"zen":"test"}'
+SIG="sha256=$(echo -n "$PAYLOAD" | openssl dgst -sha256 -hmac "$SECRET" | cut -d' ' -f2)"
+
+# Send a ping
+curl -X POST http://localhost:8000/webhooks \
+  -H "X-Hub-Signature-256: $SIG" \
+  -H "X-GitHub-Event: ping" \
+  -H "X-GitHub-Delivery: $(uuidgen)" \
+  -H "Content-Type: application/json" \
+  -d "$PAYLOAD"
+# → {"status": "pong"}
 ```
 
 ### Run Tests
@@ -239,9 +273,16 @@ src/codepulse/
 │   ├── base.py               # SQLAlchemy DeclarativeBase
 │   └── tables.py             # All 6 ORM models
 ├── persistence/
-│   └── database.py           # Engine + session factory
-├── ingestion/                # Phase 2: webhook service
-├── worker/                   # Phase 6: Celery orchestration
+│   └── database.py           # Engine + session factory (cached)
+├── ingestion/
+│   ├── app.py                # FastAPI application + health probes
+│   ├── webhook.py            # POST /webhooks handler
+│   ├── signature.py          # HMAC-SHA256 verification
+│   ├── service.py            # DB operations (upsert, create, log)
+│   └── dependencies.py       # FastAPI dependency injection
+├── worker/
+│   ├── celery_app.py         # Celery app configuration
+│   └── tasks.py              # Task stubs (Phase 6 wiring)
 ├── analysis/                 # Phase 3-4: AST + LLM engines
 ├── aggregation/              # Phase 5: dedup + review posting
 └── common/                   # Shared utilities

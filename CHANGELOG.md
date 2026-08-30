@@ -1,6 +1,45 @@
 # CHANGELOG
 
 All notable changes to CodePulse AI are documented here.
+
+## [Unreleased] — Phase 2: Webhook Ingestion Service
+
+### Added
+- **FastAPI webhook endpoint** (`POST /webhooks`) implementing the full
+  Section 3.1 flow:
+  - HMAC-SHA256 signature verification with constant-time comparison
+    (Section 3.1.1).
+  - Event filtering: accepts `pull_request` with actions `opened`,
+    `synchronize`, `reopened`; responds to `ping` with `{"status": "pong"}`;
+    silently discards all other events (Section 3.1.2).
+  - Redis-based idempotency via `SET NX` with 1-hour TTL on key
+    `idempotency:{installation_id}:{pr}:{sha}` (Section 3.1.3).
+  - DB-level idempotency fallback via `ON CONFLICT DO NOTHING` on the
+    `(repository_id, pull_request_number, head_sha)` unique constraint
+    (Section 6.1, Level 2).
+  - Repository upsert (`INSERT ... ON CONFLICT DO UPDATE`) and
+    `analysis_runs` row creation with `status='pending'` (Section 10.1, Step 5).
+  - Celery task enqueue to `cp-high` queue (Section 3.1.4).
+  - Webhook event logging to `webhook_events_log` with processed/duplicate
+    flags.
+- **Health endpoints** (`/health/live`, `/health/ready`) checking Redis and
+  PostgreSQL connectivity (Section 8.5).
+- **Celery worker stub** (`src/codepulse/worker/`) — app configuration and
+  `tasks.orchestrate_pr_analysis` task stub that logs receipt. Actual pipeline
+  wiring deferred to Phase 6.
+- **Database caching** — `persistence/database.py` now caches SQLAlchemy
+  engines and session factories per-URL.
+- **docker-compose `web` service** — runs uvicorn on port 8000, depends on
+  migrations completing first.
+- **Tests** — 28 new tests in `tests/test_webhook.py`:
+  - 7 signature verification tests (including constant-time check)
+  - 3 HTTP-level signature tests (valid/bad/missing)
+  - 7 event filtering tests (ping, opened/sync/reopened, closed/labeled/unknown)
+  - 5 idempotency tests (first/dup/different-SHA/task-not-enqueued/DB-fallback)
+  - 2 task enqueue tests (kwargs correctness, service function calls)
+  - 3 webhook logging tests (processed/filtered/duplicate flags)
+  - 1 health endpoint test
+
 ## [Unreleased] — Phase 1: Project Skeleton + Data Model
 
 ### Added

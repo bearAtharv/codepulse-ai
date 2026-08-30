@@ -1,1 +1,1 @@
-"""Webhook ingestion — implemented in Phase 2."""
+"""Webhook ingestion service — FastAPI app, signature verification, event handling."""

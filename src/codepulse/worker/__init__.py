@@ -1,1 +1,1 @@
-"""Celery worker — implemented in Phase 6."""
+"""Celery worker — task definitions and app configuration."""
