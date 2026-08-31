@@ -75,3 +75,30 @@ to match the doc exactly. The SQLAlchemy ORM model additionally sets
 creating objects via the ORM (without requiring a DB round-trip). Both paths
 produce valid UUIDv4 values. The server default acts as a safety net for any
 raw SQL inserts.
+
+---
+
+## DEC-006: `check_event_listener_leak` matches by event-name string only
+
+**Context:** The JS/TS memory-leak heuristic `check_event_listener_leak`
+(Section 3.3.4) scans for `addEventListener` calls and looks for a
+corresponding `removeEventListener` call *anywhere in the same file* with the
+same event-name string (e.g. `"click"`).
+
+This is a deliberate simplification.  A fully precise check would need to match
+on (element, event-name, handler-reference) and track cross-file cleanup (e.g.
+the listener is added in one file and removed in a React `useEffect` cleanup in
+another).  That level of analysis requires inter-procedural data-flow tracking
+that is beyond the scope of lightweight AST heuristics.
+
+**Known limitations:**
+
+- **False negatives:** An unrelated `removeEventListener("click", …)` in the
+  same file will suppress a genuine leak on a *different* element or handler.
+- **False positives:** Cleanup performed in a different file/chunk (e.g. a
+  separate cleanup module) will not be seen, causing a spurious finding.
+
+**Decision:** Accepted as a heuristic tradeoff. The rule provides useful
+signal for common SPA patterns (mount without unmount cleanup) where both calls
+typically live in the same component file. The LLM analysis path (Phase 4) can
+provide deeper cross-file reasoning to compensate.

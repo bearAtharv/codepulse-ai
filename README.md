@@ -12,7 +12,7 @@ CodePulse AI is a GitHub App that automatically reviews pull requests using a co
 |-------|-------------|--------|
 | **1** | Project skeleton + data model | ✅ Done |
 | **2** | Webhook ingestion service | ✅ Done |
-| **3** | AST analysis engine (Python, JS/TS) | 🔲 Planned |
+| **3** | AST analysis engine (Python, JS/TS) | ✅ Done |
 | **4** | LLM analysis engine (Gemini) | 🔲 Planned |
 | **5** | Aggregation, dedup, GitHub review posting | 🔲 Planned |
 | **6** | Celery orchestration wiring | 🔲 Planned |
@@ -213,6 +213,16 @@ The `analysis_runs` table has a unique constraint on `(repository_id, pull_reque
 - **Celery worker stub** (task defined, actual pipeline wiring is Phase 6)
 - **28 unit tests** covering signatures, filtering, idempotency, task enqueue, and logging
 
+### Phase 3 — AST Analysis Engine (Python + JS/TS)
+
+- **`analyze_chunk(source, filename, modified_lines=…)`** — main entry point that detects language from extension, parses via tree-sitter, runs all applicable heuristics, and returns structured `ASTFinding` objects
+- **Language registry** supporting Python (`.py`, `.pyi`), JavaScript (`.js`, `.jsx`, `.mjs`, `.cjs`), TypeScript (`.ts`), TSX (`.tsx`)
+- **17 AST heuristic rules** covering OWASP Top 10 and memory leak patterns:
+  - *Python (12 rules):* SQL injection, eval/exec, command injection, empty except, hardcoded secrets, weak crypto, DEBUG mode, bind 0.0.0.0, pickle/yaml deserialization, logging sensitive data, JWT verify disabled, SSRF, unclosed file handles
+  - *JS/TS (7 rules):* eval, SQL injection, innerHTML XSS, empty catch, hardcoded secrets, logging sensitive data, addEventListener leaks
+- **Diff-aware filtering** — restricts findings to only lines that were actually changed in the diff
+- **69 unit tests** — each heuristic tested with both vulnerable (must fire) and clean (must stay silent) code, plus integration tests against multi-pattern fixture files
+
 ---
 
 ## Getting Started
@@ -283,9 +293,27 @@ src/codepulse/
 ├── worker/
 │   ├── celery_app.py         # Celery app configuration
 │   └── tasks.py              # Task stubs (Phase 6 wiring)
-├── analysis/                 # Phase 3-4: AST + LLM engines
+├── analysis/
+│   ├── ast_engine.py         # analyze_chunk() entry point
+│   ├── languages.py          # Extension → tree-sitter parser registry
+│   └── heuristics/
+│       ├── base.py           # ASTFinding dataclass + tree helpers
+│       ├── python_owasp.py   # 11 Python OWASP heuristics
+│       ├── python_memory.py  # Python memory leak heuristics
+│       ├── javascript_owasp.py  # 6 JS/TS OWASP heuristics
+│       └── javascript_memory.py # JS/TS memory leak heuristics
 ├── aggregation/              # Phase 5: dedup + review posting
 └── common/                   # Shared utilities
+
+tests/
+├── fixtures/
+│   ├── python_vulnerable.py  # Known-vulnerable Python code
+│   ├── python_clean.py       # Known-clean Python code
+│   ├── javascript_vulnerable.js  # Known-vulnerable JS code
+│   └── javascript_clean.js   # Known-clean JS code
+├── test_models.py            # Phase 1: 30 model tests
+├── test_webhook.py           # Phase 2: 28 webhook tests
+└── test_ast_engine.py        # Phase 3: 69 AST engine tests
 ```
 
 ---

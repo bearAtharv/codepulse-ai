@@ -2,6 +2,52 @@
 
 All notable changes to CodePulse AI are documented here.
 
+## [Unreleased] — Phase 3: AST Analysis Engine (Python + JS/TS)
+
+### Added
+- **AST analysis engine** (`src/codepulse/analysis/ast_engine.py`) — main entry
+  point `analyze_chunk(source, filename, modified_lines=…)` that parses code
+  via tree-sitter, runs all applicable heuristics, and returns structured
+  `ASTFinding` objects (Section 3.3).
+- **Language registry** (`src/codepulse/analysis/languages.py`) — maps file
+  extensions to tree-sitter grammars.  Supported: Python (`.py`, `.pyi`),
+  JavaScript (`.js`, `.jsx`, `.mjs`, `.cjs`), TypeScript (`.ts`), TSX (`.tsx`).
+- **Python OWASP heuristics** (11 rules):
+  - A03: SQL injection (string concat + f-string), eval/exec, command injection
+    (subprocess/os.system)
+  - A04: Empty except blocks (bare or broad catch with only `pass`)
+  - A02: Hardcoded secrets, weak crypto (hashlib.md5/sha1)
+  - A05: `DEBUG = True`, binding to `0.0.0.0`
+  - A08: Dangerous deserialization (pickle.loads, yaml.load without SafeLoader)
+  - A09: Sensitive data in logging/print calls
+  - A07: JWT decode with `verify=False`
+  - A10: SSRF (user-controlled URL in requests.get, httpx, urllib)
+- **Python memory-leak heuristic** — `open()` without `with` statement
+  (Section 3.3.4).
+- **JS/TS OWASP heuristics** (6 rules):
+  - A03: eval(), SQL injection (string concat + template literal), innerHTML XSS
+  - A04: Empty catch blocks
+  - A02: Hardcoded secrets in const/let/var declarations
+  - A09: Sensitive data in console.log/warn/error
+- **JS/TS memory-leak heuristic** — `addEventListener` without corresponding
+  `removeEventListener` in the same file (Section 3.3.4).
+- **Diff-aware filtering** (Section 3.3.2) — optional `modified_lines` parameter
+  restricts findings to only lines that were actually changed in the diff.
+- **tree-sitter dependencies** added to `pyproject.toml`: `tree-sitter`,
+  `tree-sitter-python`, `tree-sitter-javascript`, `tree-sitter-typescript`.
+- **Test fixtures** — known-vulnerable and known-clean code files for Python
+  and JavaScript in `tests/fixtures/`.
+- **Tests** — 69 new tests in `tests/test_ast_engine.py`:
+  - 5 language detection tests
+  - 38 Python heuristic tests (fire on vulnerable + silent on clean per rule)
+  - 16 JS/TS heuristic tests (fire on vulnerable + silent on clean per rule)
+  - 3 TypeScript-specific tests (TS/TSX get same JS heuristics)
+  - 3 diff-aware filtering tests
+  - 2 finding structure validation tests
+  - 2 integration tests (full fixture files — vulnerable and clean)
+- **DECISIONS.md** — DEC-006: documents `check_event_listener_leak`
+  event-name-only matching limitation.
+
 ## [Unreleased] — Phase 2: Webhook Ingestion Service
 
 ### Added

@@ -1,1 +1,1 @@
-"""AST and LLM analysis engines — implemented in Phases 3-4."""
+"""AST and LLM analysis engines — Phase 3 (AST) implemented."""
