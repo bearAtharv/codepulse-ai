@@ -2,6 +2,52 @@
 
 All notable changes to CodePulse AI are documented here.
 
+## [Unreleased] — Phase 4: LLM Analysis Engine (Gemini)
+
+### Added
+- **LLM analysis engine** (`src/codepulse/analysis/llm_engine.py`) — main entry
+  point `analyze_llm(chunks, repo_name, language)` that constructs a structured
+  prompt, calls the Gemini API (or mock), validates the response, remaps OWASP
+  categories, and returns structured findings (Section 3.4).
+- **Prompt construction** (`src/codepulse/analysis/llm_prompt.py`) — builds the
+  four-section prompt per §3.4.2: system instruction, repository context,
+  CODE_DIFF-wrapped chunks (§3.4.7 prompt injection defense), and analysis
+  directives. SHA-256 prompt hashing for cache keying (§3.4.5).
+- **Pydantic response schemas** (`src/codepulse/analysis/llm_schemas.py`) —
+  `LLMResponse`, `LLMFindingItem`, `LLMTokenUsage`, `LLMResponseMetadata`
+  matching the structured output schema from §3.4.3. OWASP category remapping
+  with keyword lookup (§3.4.4) and `raw_category` preservation for auditing.
+- **LLM client abstraction** (`src/codepulse/analysis/llm_client.py`):
+  - `GeminiClient` — real API client using `google-genai` SDK with structured
+    output mode, no function declarations (§3.4.7), and system instruction
+    isolation.
+  - `MockLLMClient` — pattern-aware mock that detects SQL injection, eval/exec,
+    hardcoded secrets, weak hashing, deserialization, empty exceptions, and
+    memory leaks in prompt content, returning realistic canned responses with
+    non-standard categories to exercise remapping.
+  - Factory `get_llm_client()` selects based on `MOCK_LLM` config flag.
+- **Prompt injection defenses** implemented per §3.4.7:
+  - Input/instruction separation (system instruction set once at client init)
+  - Output schema enforcement (structured output mode)
+  - CODE_DIFF delimiter wrapping with explicit untrusted-content warning
+  - Output validation (findings referencing files not in the prompt are discarded)
+  - No tool use (no function declarations configured)
+- **Error handling** — retry-once on schema validation failure (§3.4.3 /
+  Branch E), then fallback to `analysis_status=llm_error` with AST-only results.
+- **`google-genai`** SDK added to `pyproject.toml`.
+- **Tests** — 54 new tests in `tests/test_llm_engine.py`:
+  - 2 system instruction tests (key phrases, fixed string)
+  - 8 prompt construction tests (4 sections, CODE_DIFF wrapping, multi-chunk)
+  - 3 prompt hash tests (determinism, content-sensitivity, hex format)
+  - 9 OWASP category remapping tests (passthrough, remap, raw preservation)
+  - 7 response schema parsing tests (valid, empty, extra fields, missing/invalid)
+  - 11 mock client tests (multi-category detection, clean silence, token usage)
+  - 2 client factory tests (mock mode, missing key error)
+  - 2 output validation tests (§3.4.7 file path filtering)
+  - 3 error handling tests (retry-once, persistent failure, empty chunks)
+  - 2 category remapping integration tests (end-to-end remap + raw_category)
+  - 5 end-to-end integration tests (vulnerable/clean code, finding structure, hash stability)
+
 ## [Unreleased] — Phase 3: AST Analysis Engine (Python + JS/TS)
 
 ### Added

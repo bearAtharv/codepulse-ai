@@ -13,7 +13,7 @@ CodePulse AI is a GitHub App that automatically reviews pull requests using a co
 | **1** | Project skeleton + data model | ✅ Done |
 | **2** | Webhook ingestion service | ✅ Done |
 | **3** | AST analysis engine (Python, JS/TS) | ✅ Done |
-| **4** | LLM analysis engine (Gemini) | 🔲 Planned |
+| **4** | LLM analysis engine (Gemini) | ✅ Done |
 | **5** | Aggregation, dedup, GitHub review posting | 🔲 Planned |
 | **6** | Celery orchestration wiring | 🔲 Planned |
 | **7** | Failure handling (retry, circuit-breaker, dead-letter) | 🔲 Planned |
@@ -223,6 +223,17 @@ The `analysis_runs` table has a unique constraint on `(repository_id, pull_reque
 - **Diff-aware filtering** — restricts findings to only lines that were actually changed in the diff
 - **69 unit tests** — each heuristic tested with both vulnerable (must fire) and clean (must stay silent) code, plus integration tests against multi-pattern fixture files
 
+### Phase 4 — LLM Analysis Engine (Gemini)
+
+- **`analyze_llm(chunks, repo_name, language)`** — constructs a structured prompt, calls Gemini (or mock), validates response against Pydantic schema, remaps OWASP categories, and filters findings by file path
+- **Prompt construction** with four sections per §3.4.2: system instruction, repo context, CODE_DIFF-wrapped chunks, analysis directives
+- **Prompt injection defenses** (§3.4.7): input/instruction separation, structured output enforcement, CODE_DIFF wrapping, output file-path validation, no tool use
+- **`MockLLMClient`** — pattern-aware mock detecting 7 vulnerability categories (SQL injection, eval, hardcoded secrets, weak hashing, deserialization, empty exceptions, memory leaks) with realistic canned responses
+- **`GeminiClient`** — real `google-genai` SDK integration with structured output mode (used when `MOCK_LLM=false` + `GEMINI_API_KEY` set)
+- **OWASP category remapping** (§3.4.4) — non-standard LLM categories remapped via keyword lookup, originals preserved in `raw_category`
+- **Error handling** — retry-once on schema validation failure, then fallback to `llm_error` status
+- **54 unit tests** covering prompt construction, schema parsing, category remapping, mock client patterns, output validation, error handling, and end-to-end integration
+
 ---
 
 ## Getting Started
@@ -302,6 +313,10 @@ src/codepulse/
 │       ├── python_memory.py  # Python memory leak heuristics
 │       ├── javascript_owasp.py  # 6 JS/TS OWASP heuristics
 │       └── javascript_memory.py # JS/TS memory leak heuristics
+│   ├── llm_engine.py         # analyze_llm() entry point
+│   ├── llm_client.py         # GeminiClient + MockLLMClient
+│   ├── llm_prompt.py         # Prompt construction + cache hash
+│   └── llm_schemas.py        # Pydantic response schemas + OWASP remap
 ├── aggregation/              # Phase 5: dedup + review posting
 └── common/                   # Shared utilities
 
@@ -313,7 +328,8 @@ tests/
 │   └── javascript_clean.js   # Known-clean JS code
 ├── test_models.py            # Phase 1: 30 model tests
 ├── test_webhook.py           # Phase 2: 28 webhook tests
-└── test_ast_engine.py        # Phase 3: 69 AST engine tests
+├── test_ast_engine.py        # Phase 3: 69 AST engine tests
+└── test_llm_engine.py        # Phase 4: 54 LLM engine tests
 ```
 
 ---
