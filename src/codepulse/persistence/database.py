@@ -6,7 +6,8 @@ a new connection pool on every request.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Generator
+import redis as redis_lib
 
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -39,3 +40,27 @@ def get_session_factory(database_url: str | None = None) -> sessionmaker[Session
         engine = get_engine(url)
         _factories[url] = sessionmaker(bind=engine, expire_on_commit=False)
     return _factories[url]
+
+# Module-level singleton; overridden in tests via FastAPI dependency_overrides.
+_redis_client: redis_lib.Redis | None = None
+
+
+def get_redis_client() -> redis_lib.Redis:
+    """Return a shared Redis client (connection-pooled internally by redis-py)."""
+    global _redis_client
+    if _redis_client is None:
+        settings = get_settings()
+        _redis_client = redis_lib.Redis.from_url(
+            settings.redis_url, decode_responses=True
+        )
+    return _redis_client
+
+
+def get_db_session() -> Generator[Session, None, None]:
+    """Yield a SQLAlchemy session, ensuring it is closed after use."""
+    factory = get_session_factory()
+    session = factory()
+    try:
+        yield session
+    finally:
+        session.close()

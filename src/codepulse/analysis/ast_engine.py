@@ -20,10 +20,8 @@ from codepulse.analysis.heuristics.base import ASTFinding
 
 # ── Heuristic imports ──────────────────────────────────────────────────
 
-from codepulse.analysis.heuristics.python_owasp import PYTHON_OWASP_HEURISTICS
-from codepulse.analysis.heuristics.python_memory import PYTHON_MEMORY_HEURISTICS
-from codepulse.analysis.heuristics.javascript_owasp import JS_OWASP_HEURISTICS
-from codepulse.analysis.heuristics.javascript_memory import JS_MEMORY_HEURISTICS
+from codepulse.analysis.heuristics.python import PYTHON_HEURISTICS
+from codepulse.analysis.heuristics.javascript import JS_HEURISTICS
 
 if TYPE_CHECKING:
     from tree_sitter import Tree
@@ -32,10 +30,10 @@ HeuristicFn = Callable[["Tree", bytes, str], list[ASTFinding]]
 
 # Language → list of heuristic functions
 _HEURISTIC_REGISTRY: dict[str, list[HeuristicFn]] = {
-    "python": PYTHON_OWASP_HEURISTICS + PYTHON_MEMORY_HEURISTICS,
-    "javascript": JS_OWASP_HEURISTICS + JS_MEMORY_HEURISTICS,
-    "typescript": JS_OWASP_HEURISTICS + JS_MEMORY_HEURISTICS,
-    "tsx": JS_OWASP_HEURISTICS + JS_MEMORY_HEURISTICS,
+    "python": PYTHON_HEURISTICS,
+    "javascript": JS_HEURISTICS,
+    "typescript": JS_HEURISTICS,
+    "tsx": JS_HEURISTICS,
 }
 
 

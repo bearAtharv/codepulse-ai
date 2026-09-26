@@ -7,9 +7,8 @@ import logging
 from fastapi import FastAPI
 from sqlalchemy import text
 
-from codepulse.ingestion.dependencies import get_redis_client
+from codepulse.persistence.database import get_engine, get_redis_client
 from codepulse.ingestion.webhook import router as webhook_router
-from codepulse.persistence.database import get_engine
 
 logger = logging.getLogger(__name__)
 

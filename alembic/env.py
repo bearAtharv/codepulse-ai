@@ -11,7 +11,7 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 # Import Base so Alembic knows about all models (needed for autogenerate)
-from codepulse.models.base import Base  # noqa: F401
+from codepulse.models.tables import Base  # noqa: F401
 import codepulse.models.tables  # noqa: F401  — force table registration
 
 config = context.config

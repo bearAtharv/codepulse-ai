@@ -1,6 +1,6 @@
 """SQLAlchemy ORM models for CodePulse AI."""
 
-from codepulse.models.base import Base
+from codepulse.models.tables import Base
 from codepulse.models.tables import (
     AnalysisRun,
     DeadLetterLog,

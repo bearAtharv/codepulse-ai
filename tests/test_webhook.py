@@ -26,12 +26,9 @@ from fastapi.testclient import TestClient
 
 from codepulse.config import Settings
 from codepulse.ingestion.app import app
-from codepulse.ingestion.dependencies import (
-    get_db_session,
-    get_redis_client,
-    get_settings_dep,
-)
-from codepulse.ingestion.signature import verify_webhook_signature
+from codepulse.config import get_settings
+from codepulse.persistence.database import get_db_session, get_redis_client
+from codepulse.ingestion.webhook import verify_webhook_signature
 
 
 # ── Helpers & fixtures ───────────────────────────────────────────────────────
@@ -153,7 +150,7 @@ def client(fake_redis, mock_db) -> TestClient:
 
     app.dependency_overrides[get_redis_client] = lambda: fake_redis
     app.dependency_overrides[get_db_session] = lambda: mock_db
-    app.dependency_overrides[get_settings_dep] = lambda: test_settings
+    app.dependency_overrides[get_settings] = lambda: test_settings
 
     with TestClient(app) as c:
         yield c

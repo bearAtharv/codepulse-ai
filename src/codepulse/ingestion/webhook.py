@@ -10,17 +10,36 @@ import redis as redis_lib
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.orm import Session
 
-from codepulse.config import Settings
+from codepulse.config import Settings, get_settings
 from codepulse.ingestion import service
-from codepulse.ingestion.dependencies import (
-    get_db_session,
-    get_redis_client,
-    get_settings_dep,
-)
-from codepulse.ingestion.signature import verify_webhook_signature
+from codepulse.persistence.database import get_db_session, get_redis_client
+import hashlib
+import hmac
 from codepulse.worker.tasks import orchestrate_pr_analysis
 
 logger = logging.getLogger(__name__)
+
+
+def verify_webhook_signature(
+    payload_body: bytes,
+    signature_header: str,
+    secret: str,
+) -> bool:
+    """Verify the ``X-Hub-Signature-256`` header against the raw request body.
+
+    Uses constant-time comparison (``hmac.compare_digest``) to prevent
+    timing attacks.
+
+    Returns ``False`` on missing, malformed, or mismatched signatures.
+    """
+    if not signature_header or not signature_header.startswith("sha256="):
+        return False
+
+    expected = "sha256=" + hmac.new(
+        secret.encode("utf-8"), payload_body, hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(expected, signature_header)
+
 
 router = APIRouter()
 
@@ -33,7 +52,7 @@ async def handle_webhook(
     request: Request,
     redis_client: redis_lib.Redis = Depends(get_redis_client),
     db: Session = Depends(get_db_session),
-    settings: Settings = Depends(get_settings_dep),
+    settings: Settings = Depends(get_settings),
 ) -> Response:
     """Receive and process GitHub webhook events.
 

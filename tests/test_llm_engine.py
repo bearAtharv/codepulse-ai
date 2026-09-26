@@ -11,12 +11,13 @@ import pytest
 from pydantic import ValidationError
 
 from codepulse.analysis.llm_client import MockLLMClient, get_llm_client
-from codepulse.analysis.llm_engine import LLMAnalysisResult, analyze_llm
-from codepulse.analysis.llm_prompt import (
+from codepulse.analysis.llm_engine import (
     SYSTEM_INSTRUCTION,
     DiffChunk,
     build_prompt,
     compute_prompt_hash,
+    LLMAnalysisResult,
+    analyze_llm,
 )
 from codepulse.analysis.llm_schemas import (
     VALID_CATEGORIES,
