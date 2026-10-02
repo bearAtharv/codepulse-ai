@@ -16,18 +16,17 @@ Usage::
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import dataclass, field
 
 from pydantic import ValidationError
-import hashlib
 
-from codepulse.analysis.llm_client import BaseLLMClient, MockLLMClient, get_llm_client
+from codepulse.analysis.llm_client import BaseLLMClient, get_llm_client
 from codepulse.analysis.llm_schemas import (
     LLMFindingItem,
     LLMResponse,
     LLMResponseMetadata,
-    LLMTokenUsage,
     remap_category,
 )
 
