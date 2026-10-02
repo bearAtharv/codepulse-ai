@@ -34,15 +34,13 @@ def check_eval(tree: Tree, filename: str) -> list[ASTFinding]:
         if name != "eval":
             continue
         findings.append(
-            ASTFinding(
+            ASTFinding.from_node(
+                call, filename,
                 rule_id="OWASP-A03-EVAL",
                 category="A03: Injection",
                 title="Use of eval() is a code-injection risk",
                 severity="high",
                 confidence="high",
-                file_path=filename,
-                line_start=call.start_point[0] + 1,
-                line_end=call.end_point[0] + 1,
                 explanation=(
                     "eval() executes arbitrary code.  If user input reaches this "
                     "call an attacker can run arbitrary JavaScript."
@@ -77,15 +75,13 @@ def check_sql_injection(tree: Tree, filename: str) -> list[ASTFinding]:
 
 
 def _js_sql_finding(node: "Node", filename: str, detail: str) -> ASTFinding:
-    return ASTFinding(
+    return ASTFinding.from_node(
+        node, filename,
         rule_id="OWASP-A03-SQL-INJECTION",
         category="A03: Injection",
         title=f"SQL injection risk via {detail}",
         severity="critical",
         confidence="high",
-        file_path=filename,
-        line_start=node.start_point[0] + 1,
-        line_end=node.end_point[0] + 1,
         explanation=(
             "Building SQL queries with string concatenation or template literals "
             "allows an attacker to inject arbitrary SQL.  Use parameterised queries."
@@ -111,15 +107,13 @@ def check_inner_html(tree: Tree, filename: str) -> list[ASTFinding]:
         if right.type == "string":
             continue
         findings.append(
-            ASTFinding(
+            ASTFinding.from_node(
+                assign, filename,
                 rule_id="OWASP-A03-INNERHTML",
                 category="A03: Injection",
                 title="innerHTML assigned from a variable (XSS risk)",
                 severity="high",
                 confidence="medium",
-                file_path=filename,
-                line_start=assign.start_point[0] + 1,
-                line_end=assign.end_point[0] + 1,
                 explanation=(
                     "Setting innerHTML to a non-literal value allows attackers "
                     "to inject arbitrary HTML and JavaScript."
@@ -143,15 +137,13 @@ def check_empty_catch(tree: Tree, filename: str) -> list[ASTFinding]:
         stmts = [c for c in body.named_children if c.type != "comment"]
         if len(stmts) == 0:
             findings.append(
-                ASTFinding(
+                ASTFinding.from_node(
+                    catch, filename,
                     rule_id="OWASP-A04-EMPTY-CATCH",
                     category="A04: Insecure Design",
                     title="Empty catch block silently swallows errors",
                     severity="medium",
                     confidence="high",
-                    file_path=filename,
-                    line_start=catch.start_point[0] + 1,
-                    line_end=catch.end_point[0] + 1,
                     explanation=(
                         "An empty catch block hides errors.  At minimum, log the "
                         "exception for debugging."
@@ -185,15 +177,13 @@ def check_hardcoded_secrets(
         val = string_literal_value(value_node)
         if val and len(val) > 0:
             findings.append(
-                ASTFinding(
+                ASTFinding.from_node(
+                    decl, filename,
                     rule_id="OWASP-A02-HARDCODED-SECRET",
                     category="A02: Cryptographic Failures",
                     title=f"Hard-coded secret in variable '{name}'",
                     severity="high",
                     confidence="medium",
-                    file_path=filename,
-                    line_start=decl.start_point[0] + 1,
-                    line_end=decl.end_point[0] + 1,
                     explanation=(
                         "Secrets in source code are easily leaked via version "
                         "control and cannot be rotated without a code change."
@@ -221,15 +211,13 @@ def check_logging_sensitive_data(
         for arg in get_call_args(call):
             if arg.type == "identifier" and is_sensitive_name(arg.text.decode()):
                 findings.append(
-                    ASTFinding(
+                    ASTFinding.from_node(
+                        call, filename,
                         rule_id="OWASP-A09-LOG-SENSITIVE",
                         category="A09: Logging Failures",
                         title=f"Sensitive data '{arg.text.decode()}' passed to console.{method}()",
                         severity="medium",
                         confidence="medium",
-                        file_path=filename,
-                        line_start=call.start_point[0] + 1,
-                        line_end=call.end_point[0] + 1,
                         explanation=(
                             "Logging sensitive values risks exposing them in "
                             "browser dev-tools, server logs, and monitoring."
@@ -272,15 +260,13 @@ def check_event_listener_leak(
     for event_name, call in add_calls:
         if event_name not in remove_events:
             findings.append(
-                ASTFinding(
+                ASTFinding.from_node(
+                    call, filename,
                     rule_id="MEM-JS-EVENT-LISTENER-LEAK",
                     category="Memory Leak",
                     title=f"addEventListener('{event_name}') without removeEventListener",
                     severity="medium",
                     confidence="medium",
-                    file_path=filename,
-                    line_start=call.start_point[0] + 1,
-                    line_end=call.end_point[0] + 1,
                     explanation=(
                         "Adding an event listener without a corresponding "
                         "removeEventListener in cleanup/unmount paths causes a "

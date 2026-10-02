@@ -50,15 +50,13 @@ def check_sql_injection(tree: Tree, filename: str) -> list[ASTFinding]:
 
 
 def _sql_finding(node: "Node", filename: str, detail: str) -> ASTFinding:
-    return ASTFinding(
+    return ASTFinding.from_node(
+        node, filename,
         rule_id="OWASP-A03-SQL-INJECTION",
         category="A03: Injection",
         title=f"SQL injection risk via {detail}",
         severity="critical",
         confidence="high",
-        file_path=filename,
-        line_start=node.start_point[0] + 1,
-        line_end=node.end_point[0] + 1,
         explanation=(
             "Building SQL queries with string concatenation or f-strings allows "
             "an attacker to inject arbitrary SQL.  Use parameterised queries."
@@ -75,15 +73,13 @@ def check_eval_exec(tree: Tree, filename: str) -> list[ASTFinding]:
         if name not in ("eval", "exec"):
             continue
         findings.append(
-            ASTFinding(
+            ASTFinding.from_node(
+                call, filename,
                 rule_id="OWASP-A03-EVAL",
                 category="A03: Injection",
                 title=f"Use of {name}() is a code-injection risk",
                 severity="high",
                 confidence="high",
-                file_path=filename,
-                line_start=call.start_point[0] + 1,
-                line_end=call.end_point[0] + 1,
                 explanation=(
                     f"{name}() executes arbitrary code.  If user input reaches "
                     "this call an attacker can run arbitrary Python on the server."
@@ -131,15 +127,13 @@ def check_command_injection(
             first.type == "string" and has_interpolation(first)
         ):
             findings.append(
-                ASTFinding(
+                ASTFinding.from_node(
+                    call, filename,
                     rule_id="OWASP-A03-COMMAND-INJECTION",
                     category="A03: Injection",
                     title="Potential shell command injection",
                     severity="critical",
                     confidence="medium",
-                    file_path=filename,
-                    line_start=call.start_point[0] + 1,
-                    line_end=call.end_point[0] + 1,
                     explanation=(
                         "Constructing shell commands from dynamic values allows "
                         "attackers to inject arbitrary OS commands."
@@ -166,15 +160,13 @@ def check_empty_except(tree: Tree, filename: str) -> list[ASTFinding]:
         stmts = [c for c in body.named_children if c.type != "comment"]
         if len(stmts) <= 1 and all(s.type == "pass_statement" for s in stmts):
             findings.append(
-                ASTFinding(
+                ASTFinding.from_node(
+                    exc, filename,
                     rule_id="OWASP-A04-EMPTY-EXCEPT",
                     category="A04: Insecure Design",
                     title="Empty except block silently swallows errors",
                     severity="medium",
                     confidence="high",
-                    file_path=filename,
-                    line_start=exc.start_point[0] + 1,
-                    line_end=exc.end_point[0] + 1,
                     explanation=(
                         "Catching exceptions with an empty handler hides bugs and "
                         "makes debugging impossible.  At minimum, log the exception."
@@ -211,15 +203,13 @@ def check_hardcoded_secrets(
         val = string_literal_value(right)
         if val and len(val) > 0:
             findings.append(
-                ASTFinding(
+                ASTFinding.from_node(
+                    assign, filename,
                     rule_id="OWASP-A02-HARDCODED-SECRET",
                     category="A02: Cryptographic Failures",
                     title=f"Hard-coded secret in variable '{name}'",
                     severity="high",
                     confidence="medium",
-                    file_path=filename,
-                    line_start=assign.start_point[0] + 1,
-                    line_end=assign.end_point[0] + 1,
                     explanation=(
                         "Secrets committed in source code are easily leaked and "
                         "cannot be rotated without a code change."
@@ -243,15 +233,13 @@ def check_weak_crypto(tree: Tree, filename: str) -> list[ASTFinding]:
         obj, method = get_call_name(call)
         if obj == "hashlib" and method in _WEAK_HASH_FUNCS:
             findings.append(
-                ASTFinding(
+                ASTFinding.from_node(
+                    call, filename,
                     rule_id="OWASP-A02-WEAK-HASH",
                     category="A02: Cryptographic Failures",
                     title=f"Use of weak hash function hashlib.{method}()",
                     severity="medium",
                     confidence="medium",
-                    file_path=filename,
-                    line_start=call.start_point[0] + 1,
-                    line_end=call.end_point[0] + 1,
                     explanation=(
                         f"hashlib.{method}() is cryptographically broken and must "
                         "not be used for password hashing or integrity checks."
@@ -277,15 +265,13 @@ def check_debug_true(tree: Tree, filename: str) -> list[ASTFinding]:
         rtext = right.text.decode()
         if lname.upper() == "DEBUG" and rtext == "True":
             findings.append(
-                ASTFinding(
+                ASTFinding.from_node(
+                    assign, filename,
                     rule_id="OWASP-A05-DEBUG-TRUE",
                     category="A05: Security Misconfiguration",
                     title="DEBUG mode enabled",
                     severity="medium",
                     confidence="high",
-                    file_path=filename,
-                    line_start=assign.start_point[0] + 1,
-                    line_end=assign.end_point[0] + 1,
                     explanation="DEBUG = True exposes stack traces and internals to users.",
                     remediation="Set DEBUG = False in production configuration.",
                 )
@@ -295,15 +281,13 @@ def check_debug_true(tree: Tree, filename: str) -> list[ASTFinding]:
             val = string_literal_value(right)
             if val == "0.0.0.0":
                 findings.append(
-                    ASTFinding(
+                    ASTFinding.from_node(
+                        assign, filename,
                         rule_id="OWASP-A05-BIND-ALL",
                         category="A05: Security Misconfiguration",
                         title="Server binding to 0.0.0.0 (all interfaces)",
                         severity="low",
                         confidence="medium",
-                        file_path=filename,
-                        line_start=assign.start_point[0] + 1,
-                        line_end=assign.end_point[0] + 1,
                         explanation=(
                             "Binding to 0.0.0.0 exposes the service on every network "
                             "interface, including public ones."
@@ -327,15 +311,13 @@ def check_dangerous_deserialization(
         # pickle.loads / pickle.load
         if obj == "pickle" and method in ("loads", "load"):
             findings.append(
-                ASTFinding(
+                ASTFinding.from_node(
+                    call, filename,
                     rule_id="OWASP-A08-PICKLE",
                     category="A08: Data Integrity Failures",
                     title="Dangerous deserialization with pickle",
                     severity="critical",
                     confidence="high",
-                    file_path=filename,
-                    line_start=call.start_point[0] + 1,
-                    line_end=call.end_point[0] + 1,
                     explanation=(
                         "pickle.loads() / pickle.load() can execute arbitrary code "
                         "embedded in the serialised data."
@@ -353,15 +335,13 @@ def check_dangerous_deserialization(
                 "yaml.CSafeLoader",
             ):
                 findings.append(
-                    ASTFinding(
+                    ASTFinding.from_node(
+                        call, filename,
                         rule_id="OWASP-A08-YAML-UNSAFE",
                         category="A08: Data Integrity Failures",
                         title="yaml.load() without SafeLoader",
                         severity="high",
                         confidence="high",
-                        file_path=filename,
-                        line_start=call.start_point[0] + 1,
-                        line_end=call.end_point[0] + 1,
                         explanation=(
                             "yaml.load() without Loader=SafeLoader can execute "
                             "arbitrary Python code embedded in the YAML document."
@@ -394,15 +374,13 @@ def check_logging_sensitive_data(
         for arg in get_call_args(call):
             if arg.type == "identifier" and is_sensitive_name(arg.text.decode()):
                 findings.append(
-                    ASTFinding(
+                    ASTFinding.from_node(
+                        call, filename,
                         rule_id="OWASP-A09-LOG-SENSITIVE",
                         category="A09: Logging Failures",
                         title=f"Sensitive data '{arg.text.decode()}' passed to logging",
                         severity="medium",
                         confidence="medium",
-                        file_path=filename,
-                        line_start=call.start_point[0] + 1,
-                        line_end=call.end_point[0] + 1,
                         explanation=(
                             "Logging sensitive values (passwords, tokens) risks "
                             "exposing them in log files, monitoring dashboards, and "
@@ -435,15 +413,13 @@ def check_jwt_verify_disabled(
             flagged = True
         if flagged:
             findings.append(
-                ASTFinding(
+                ASTFinding.from_node(
+                    call, filename,
                     rule_id="OWASP-A07-JWT-NO-VERIFY",
                     category="A07: Auth Failures",
                     title="JWT signature verification disabled",
                     severity="critical",
                     confidence="high",
-                    file_path=filename,
-                    line_start=call.start_point[0] + 1,
-                    line_end=call.end_point[0] + 1,
                     explanation=(
                         "Decoding a JWT without verifying the signature allows "
                         "attackers to forge tokens with arbitrary claims."
@@ -485,15 +461,13 @@ def check_ssrf(tree: Tree, filename: str) -> list[ASTFinding]:
         # Dangerous when first arg is a bare variable (not a string literal)
         if first.type == "identifier":
             findings.append(
-                ASTFinding(
+                ASTFinding.from_node(
+                    call, filename,
                     rule_id="OWASP-A10-SSRF",
                     category="A10: SSRF",
                     title="Potential SSRF — user-controlled URL in HTTP request",
                     severity="high",
                     confidence="medium",
-                    file_path=filename,
-                    line_start=call.start_point[0] + 1,
-                    line_end=call.end_point[0] + 1,
                     explanation=(
                         "Passing a variable directly to an HTTP client function "
                         "without URL validation can allow Server-Side Request Forgery."
@@ -530,15 +504,13 @@ def check_unclosed_resources(
         if find_ancestor(call, "with_item"):
             continue
         findings.append(
-            ASTFinding(
+            ASTFinding.from_node(
+                call, filename,
                 rule_id="MEM-PYTHON-UNCLOSED-RESOURCE",
                 category="Memory Leak",
                 title="Resource opened without context manager",
                 severity="medium",
                 confidence="medium",
-                file_path=filename,
-                line_start=call.start_point[0] + 1,
-                line_end=call.end_point[0] + 1,
                 explanation=(
                     "Calling open() without a ``with`` statement risks leaving "
                     "the file handle open if an exception occurs before .close()."

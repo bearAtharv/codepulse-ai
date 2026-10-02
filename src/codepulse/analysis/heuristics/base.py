@@ -28,6 +28,21 @@ class ASTFinding:
     remediation: str
     source: str = "ast"
 
+    @classmethod
+    def from_node(
+        cls,
+        node: "Node",
+        filename: str,
+        **kwargs: str,
+    ) -> "ASTFinding":
+        """Create a finding with line numbers extracted from a tree-sitter node."""
+        return cls(
+            file_path=filename,
+            line_start=node.start_point[0] + 1,
+            line_end=node.end_point[0] + 1,
+            **kwargs,
+        )
+
 
 # ── Sensitive-name detection (A02 / A09) ───────────────────────────────
 
