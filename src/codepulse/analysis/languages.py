@@ -19,8 +19,6 @@ EXTENSION_MAP: dict[str, str] = {
     ".tsx": "tsx",
 }
 
-SUPPORTED_LANGUAGES = frozenset({"python", "javascript", "typescript", "tsx"})
-
 
 def detect_language(filename: str) -> str | None:
     """Detect language from file extension.  Returns *None* for unsupported files."""

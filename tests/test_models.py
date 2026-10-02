@@ -7,8 +7,6 @@ indexes) WITHOUT requiring a live database connection.
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import inspect as sa_inspect
-
 from codepulse.models import (
     AnalysisRun,
     Base,

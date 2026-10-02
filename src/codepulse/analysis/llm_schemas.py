@@ -7,7 +7,6 @@ canonical OWASP Top 10 mapping from Section 3.4.4.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -115,7 +114,7 @@ class LLMFindingItem(BaseModel):
     confidence: Confidence
 
     # Set after remap; not part of the LLM response itself.
-    raw_category: Optional[str] = None
+    raw_category: str | None = None
 
 
 class LLMTokenUsage(BaseModel):
@@ -144,60 +143,3 @@ class LLMResponse(BaseModel):
 
     model_config = {"extra": "ignore"}
 
-
-# ── Gemini structured output schema dict ───────────────────────────────
-# This is the JSON Schema passed to the Gemini API via response_schema.
-
-GEMINI_RESPONSE_SCHEMA: dict = {
-    "type": "object",
-    "properties": {
-        "findings": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "file_path": {"type": "string"},
-                    "line_start": {"type": "integer"},
-                    "line_end": {"type": "integer"},
-                    "severity": {
-                        "type": "string",
-                        "enum": ["critical", "high", "medium", "low"],
-                    },
-                    "category": {"type": "string"},
-                    "title": {"type": "string"},
-                    "explanation": {"type": "string"},
-                    "remediation": {"type": "string"},
-                    "confidence": {
-                        "type": "string",
-                        "enum": ["high", "medium", "low"],
-                    },
-                },
-                "required": [
-                    "file_path",
-                    "line_start",
-                    "line_end",
-                    "severity",
-                    "category",
-                    "title",
-                    "explanation",
-                    "remediation",
-                    "confidence",
-                ],
-            },
-        },
-        "metadata": {
-            "type": "object",
-            "properties": {
-                "model_version": {"type": "string"},
-                "token_usage": {
-                    "type": "object",
-                    "properties": {
-                        "input": {"type": "integer"},
-                        "output": {"type": "integer"},
-                    },
-                },
-            },
-        },
-    },
-    "required": ["findings", "metadata"],
-}

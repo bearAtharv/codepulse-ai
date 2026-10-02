@@ -6,13 +6,12 @@ Uses inline code snippets for unit tests and fixture files for integration tests
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
 
 from codepulse.analysis.ast_engine import analyze_chunk
-from codepulse.analysis.languages import detect_language, EXTENSION_MAP
+from codepulse.analysis.languages import detect_language
 
 FIXTURES = Path(__file__).parent / "fixtures"
 

@@ -14,7 +14,6 @@ import json
 import logging
 import re
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
 
 from codepulse.analysis.llm_schemas import (
     Confidence,
@@ -24,9 +23,6 @@ from codepulse.analysis.llm_schemas import (
     LLMTokenUsage,
     Severity,
 )
-
-if TYPE_CHECKING:
-    pass
 
 logger = logging.getLogger(__name__)
 

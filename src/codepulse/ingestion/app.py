@@ -2,15 +2,11 @@
 
 from __future__ import annotations
 
-import logging
-
 from fastapi import FastAPI
 from sqlalchemy import text
 
 from codepulse.persistence.database import get_engine, get_redis_client
 from codepulse.ingestion.webhook import router as webhook_router
-
-logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="CodePulse AI",

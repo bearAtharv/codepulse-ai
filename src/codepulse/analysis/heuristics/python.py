@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 _SQL_METHODS = frozenset({"execute", "executemany", "executescript"})
 
 
-def check_sql_injection(tree: Tree, source: bytes, filename: str) -> list[ASTFinding]:
+def check_sql_injection(tree: Tree, filename: str) -> list[ASTFinding]:
     """A03 — SQL injection via string concat / f-string in execute() calls."""
     findings: list[ASTFinding] = []
     for call in find_nodes(tree.root_node, "call"):
@@ -67,7 +67,7 @@ def _sql_finding(node: "Node", filename: str, detail: str) -> ASTFinding:
     )
 
 
-def check_eval_exec(tree: Tree, source: bytes, filename: str) -> list[ASTFinding]:
+def check_eval_exec(tree: Tree, filename: str) -> list[ASTFinding]:
     """A03 / A08 — Use of ``eval()`` or ``exec()``."""
     findings: list[ASTFinding] = []
     for call in find_nodes(tree.root_node, "call"):
@@ -111,7 +111,7 @@ _CMD_PAIRS = frozenset(
 
 
 def check_command_injection(
-    tree: Tree, source: bytes, filename: str
+    tree: Tree, filename: str
 ) -> list[ASTFinding]:
     """A03 — Shell command injection via subprocess / os.system with strings."""
     findings: list[ASTFinding] = []
@@ -156,11 +156,11 @@ def check_command_injection(
 # ── A04: Insecure Design ──────────────────────────────────────────────
 
 
-def check_empty_except(tree: Tree, source: bytes, filename: str) -> list[ASTFinding]:
+def check_empty_except(tree: Tree, filename: str) -> list[ASTFinding]:
     """A04 — Empty ``except`` blocks (bare or broad catch with only ``pass``)."""
     findings: list[ASTFinding] = []
     for exc in find_nodes(tree.root_node, "except_clause"):
-        body = _except_body(exc)
+        body = next((c for c in exc.children if c.type == "block"), None)
         if body is None:
             continue
         stmts = [c for c in body.named_children if c.type != "comment"]
@@ -187,19 +187,12 @@ def check_empty_except(tree: Tree, source: bytes, filename: str) -> list[ASTFind
     return findings
 
 
-def _except_body(exc_node: "Node") -> "Node | None":
-    """Return the ``block`` child of an ``except_clause``."""
-    for child in exc_node.children:
-        if child.type == "block":
-            return child
-    return None
-
 
 # ── A02: Cryptographic Failures ────────────────────────────────────────
 
 
 def check_hardcoded_secrets(
-    tree: Tree, source: bytes, filename: str
+    tree: Tree, filename: str
 ) -> list[ASTFinding]:
     """A02 — Hard-coded strings assigned to sensitive variable names."""
     findings: list[ASTFinding] = []
@@ -243,7 +236,7 @@ def check_hardcoded_secrets(
 _WEAK_HASH_FUNCS = frozenset({"md5", "sha1"})
 
 
-def check_weak_crypto(tree: Tree, source: bytes, filename: str) -> list[ASTFinding]:
+def check_weak_crypto(tree: Tree, filename: str) -> list[ASTFinding]:
     """A02 — Use of weak hash functions (MD5 / SHA1)."""
     findings: list[ASTFinding] = []
     for call in find_nodes(tree.root_node, "call"):
@@ -272,7 +265,7 @@ def check_weak_crypto(tree: Tree, source: bytes, filename: str) -> list[ASTFindi
 # ── A05: Security Misconfiguration ─────────────────────────────────────
 
 
-def check_debug_true(tree: Tree, source: bytes, filename: str) -> list[ASTFinding]:
+def check_debug_true(tree: Tree, filename: str) -> list[ASTFinding]:
     """A05 — ``DEBUG = True`` or binding to ``0.0.0.0``."""
     findings: list[ASTFinding] = []
     for assign in find_nodes(tree.root_node, "assignment"):
@@ -325,7 +318,7 @@ def check_debug_true(tree: Tree, source: bytes, filename: str) -> list[ASTFindin
 
 
 def check_dangerous_deserialization(
-    tree: Tree, source: bytes, filename: str
+    tree: Tree, filename: str
 ) -> list[ASTFinding]:
     """A08 — ``pickle.loads/load``, ``yaml.load`` without SafeLoader."""
     findings: list[ASTFinding] = []
@@ -387,7 +380,7 @@ _LOG_METHODS = frozenset(
 
 
 def check_logging_sensitive_data(
-    tree: Tree, source: bytes, filename: str
+    tree: Tree, filename: str
 ) -> list[ASTFinding]:
     """A09 — Sensitive variable names passed to logging / print calls."""
     findings: list[ASTFinding] = []
@@ -425,7 +418,7 @@ def check_logging_sensitive_data(
 
 
 def check_jwt_verify_disabled(
-    tree: Tree, source: bytes, filename: str
+    tree: Tree, filename: str
 ) -> list[ASTFinding]:
     """A07 — ``jwt.decode(…, verify=False)`` or ``options={…verify_signature: False}``."""
     findings: list[ASTFinding] = []
@@ -478,7 +471,7 @@ _HTTP_PAIRS = frozenset(
 )
 
 
-def check_ssrf(tree: Tree, source: bytes, filename: str) -> list[ASTFinding]:
+def check_ssrf(tree: Tree, filename: str) -> list[ASTFinding]:
     """A10 — User-controlled variables passed directly to HTTP clients."""
     findings: list[ASTFinding] = []
     for call in find_nodes(tree.root_node, "call"):
@@ -521,7 +514,7 @@ _RESOURCE_OPENERS = frozenset({"open"})
 
 
 def check_unclosed_resources(
-    tree: Tree, source: bytes, filename: str
+    tree: Tree, filename: str
 ) -> list[ASTFinding]:
     """Detect ``open()`` calls whose result is *not* managed by a ``with`` statement.
 

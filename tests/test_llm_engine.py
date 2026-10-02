@@ -5,8 +5,6 @@ All tests use MOCK_LLM=true and require no Gemini API key.
 
 from __future__ import annotations
 
-import json
-
 import pytest
 from pydantic import ValidationError
 
@@ -16,7 +14,6 @@ from codepulse.analysis.llm_engine import (
     DiffChunk,
     build_prompt,
     compute_prompt_hash,
-    LLMAnalysisResult,
     analyze_llm,
 )
 from codepulse.analysis.llm_schemas import (
@@ -24,7 +21,6 @@ from codepulse.analysis.llm_schemas import (
     LLMFindingItem,
     LLMResponse,
     LLMResponseMetadata,
-    LLMTokenUsage,
     remap_category,
 )
 

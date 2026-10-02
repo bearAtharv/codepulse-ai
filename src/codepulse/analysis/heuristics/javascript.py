@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 # ── A03: Injection ─────────────────────────────────────────────────────
 
 
-def check_eval(tree: Tree, source: bytes, filename: str) -> list[ASTFinding]:
+def check_eval(tree: Tree, filename: str) -> list[ASTFinding]:
     """A03 — Use of ``eval()``."""
     findings: list[ASTFinding] = []
     for call in find_nodes(tree.root_node, "call_expression"):
@@ -56,7 +56,7 @@ def check_eval(tree: Tree, source: bytes, filename: str) -> list[ASTFinding]:
 _JS_SQL_METHODS = frozenset({"query", "execute", "raw"})
 
 
-def check_sql_injection(tree: Tree, source: bytes, filename: str) -> list[ASTFinding]:
+def check_sql_injection(tree: Tree, filename: str) -> list[ASTFinding]:
     """A03 — SQL injection via template literal or string concat in query()."""
     findings: list[ASTFinding] = []
     for call in find_nodes(tree.root_node, "call_expression"):
@@ -94,7 +94,7 @@ def _js_sql_finding(node: "Node", filename: str, detail: str) -> ASTFinding:
     )
 
 
-def check_inner_html(tree: Tree, source: bytes, filename: str) -> list[ASTFinding]:
+def check_inner_html(tree: Tree, filename: str) -> list[ASTFinding]:
     """A03 — ``element.innerHTML = variable`` (XSS vector)."""
     findings: list[ASTFinding] = []
     for assign in find_nodes(tree.root_node, "assignment_expression"):
@@ -133,7 +133,7 @@ def check_inner_html(tree: Tree, source: bytes, filename: str) -> list[ASTFindin
 # ── A04: Insecure Design ──────────────────────────────────────────────
 
 
-def check_empty_catch(tree: Tree, source: bytes, filename: str) -> list[ASTFinding]:
+def check_empty_catch(tree: Tree, filename: str) -> list[ASTFinding]:
     """A04 — Empty ``catch`` blocks."""
     findings: list[ASTFinding] = []
     for catch in find_nodes(tree.root_node, "catch_clause"):
@@ -166,7 +166,7 @@ def check_empty_catch(tree: Tree, source: bytes, filename: str) -> list[ASTFindi
 
 
 def check_hardcoded_secrets(
-    tree: Tree, source: bytes, filename: str
+    tree: Tree, filename: str
 ) -> list[ASTFinding]:
     """A02 — Hard-coded secrets in ``const``/``let``/``var`` declarations."""
     findings: list[ASTFinding] = []
@@ -210,7 +210,7 @@ _JS_LOG_METHODS = frozenset({"log", "info", "warn", "error", "debug", "trace"})
 
 
 def check_logging_sensitive_data(
-    tree: Tree, source: bytes, filename: str
+    tree: Tree, filename: str
 ) -> list[ASTFinding]:
     """A09 — Sensitive variable names passed to ``console.*`` calls."""
     findings: list[ASTFinding] = []
@@ -243,7 +243,7 @@ def check_logging_sensitive_data(
 # ── Registry ───────────────────────────────────────────────────────────
 
 def check_event_listener_leak(
-    tree: Tree, source: bytes, filename: str
+    tree: Tree, filename: str
 ) -> list[ASTFinding]:
     """Detect addEventListener calls with no matching removeEventListener.
 

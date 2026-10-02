@@ -6,7 +6,6 @@ without needing a live PostgreSQL instance.
 
 from __future__ import annotations
 
-import logging
 import uuid as uuid_mod
 from datetime import datetime
 
@@ -16,7 +15,6 @@ from sqlalchemy.sql import func
 
 from codepulse.models.tables import AnalysisRun, Repository, WebhookEventLog
 
-logger = logging.getLogger(__name__)
 
 
 def log_webhook_event(

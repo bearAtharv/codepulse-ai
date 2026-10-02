@@ -26,7 +26,7 @@ from codepulse.analysis.heuristics.javascript import JS_HEURISTICS
 if TYPE_CHECKING:
     from tree_sitter import Tree
 
-HeuristicFn = Callable[["Tree", bytes, str], list[ASTFinding]]
+HeuristicFn = Callable[["Tree", str], list[ASTFinding]]
 
 # Language → list of heuristic functions
 _HEURISTIC_REGISTRY: dict[str, list[HeuristicFn]] = {
@@ -63,13 +63,12 @@ def analyze_chunk(
         return []
 
     parser = get_parser(lang)
-    source_bytes = source.encode("utf-8")
-    tree = parser.parse(source_bytes)
+    tree = parser.parse(source.encode("utf-8"))
 
     heuristics = _HEURISTIC_REGISTRY[lang]
     findings: list[ASTFinding] = []
     for heuristic in heuristics:
-        findings.extend(heuristic(tree, source_bytes, filename))
+        findings.extend(heuristic(tree, filename))
 
     # Diff-aware filtering (Section 3.3.2)
     if modified_lines is not None:
