@@ -7,6 +7,8 @@ indexes) WITHOUT requiring a live database connection.
 import uuid
 from datetime import datetime, timezone
 
+import pytest
+
 from codepulse.models import (
     AnalysisRun,
     Base,
@@ -46,21 +48,85 @@ class TestTableRegistration:
         )
 
 
-# ── Column verification ────────────────────────────────────────────────────
+# ── Table metadata & Column verification ───────────────────────────────────
+
+MODEL_TABLE_COLUMN_SPECS = [
+    (
+        Repository,
+        "repositories",
+        {
+            "id", "github_id", "full_name", "installation_id",
+            "default_branch", "primary_language", "created_at", "updated_at",
+        },
+    ),
+    (
+        AnalysisRun,
+        "analysis_runs",
+        {
+            "id", "repository_id", "pull_request_number", "head_sha",
+            "base_sha", "pr_author", "status", "files_analyzed",
+            "chunks_total", "chunks_completed", "total_findings",
+            "critical_count", "high_count", "medium_count", "low_count",
+            "analysis_duration_ms", "review_posted_at", "github_review_id",
+            "error_message", "reanalysis_needed", "webhook_received_at",
+            "created_at",
+        },
+    ),
+    (
+        Finding,
+        "findings",
+        {
+            "id", "analysis_run_id", "file_path", "line_start", "line_end",
+            "severity", "category", "title", "explanation", "remediation",
+            "confidence", "source", "raw_llm_category", "is_posted",
+            "created_at",
+        },
+    ),
+    (
+        LlmUsageLog,
+        "llm_usage_log",
+        {
+            "id", "analysis_run_id", "model_version", "input_tokens",
+            "output_tokens", "latency_ms", "cache_hit", "created_at",
+        },
+    ),
+    (
+        DeadLetterLog,
+        "dead_letter_log",
+        {
+            "id", "task_name", "task_id", "task_args", "exception_type",
+            "exception_message", "traceback", "retry_count", "resolved",
+            "created_at",
+        },
+    ),
+    (
+        WebhookEventLog,
+        "webhook_events_log",
+        {
+            "id", "delivery_id", "event_type", "action",
+            "repository_full_name", "processed", "duplicate", "received_at",
+        },
+    ),
+]
+
+
+class TestModelTableAndColumns:
+    """Parametrized metadata verification across all 6 models."""
+
+    @pytest.mark.parametrize("model_cls, expected_tablename, _", MODEL_TABLE_COLUMN_SPECS)
+    def test_tablename(self, model_cls, expected_tablename, _) -> None:
+        assert model_cls.__tablename__ == expected_tablename
+
+    @pytest.mark.parametrize("model_cls, _, expected_columns", MODEL_TABLE_COLUMN_SPECS)
+    def test_columns(self, model_cls, _, expected_columns) -> None:
+        cols = {c.name for c in model_cls.__table__.columns}
+        assert cols == expected_columns
+
+
+# ── Specific model constraints & indexes ───────────────────────────────────
 
 
 class TestRepositoryModel:
-    def test_tablename(self) -> None:
-        assert Repository.__tablename__ == "repositories"
-
-    def test_columns(self) -> None:
-        cols = {c.name for c in Repository.__table__.columns}
-        expected = {
-            "id", "github_id", "full_name", "installation_id",
-            "default_branch", "primary_language", "created_at", "updated_at",
-        }
-        assert cols == expected
-
     def test_github_id_unique(self) -> None:
         col = Repository.__table__.c.github_id
         assert col.unique is True
@@ -71,26 +137,9 @@ class TestRepositoryModel:
 
 
 class TestAnalysisRunModel:
-    def test_tablename(self) -> None:
-        assert AnalysisRun.__tablename__ == "analysis_runs"
-
-    def test_columns(self) -> None:
-        cols = {c.name for c in AnalysisRun.__table__.columns}
-        expected = {
-            "id", "repository_id", "pull_request_number", "head_sha",
-            "base_sha", "pr_author", "status", "files_analyzed",
-            "chunks_total", "chunks_completed", "total_findings",
-            "critical_count", "high_count", "medium_count", "low_count",
-            "analysis_duration_ms", "review_posted_at", "github_review_id",
-            "error_message", "reanalysis_needed", "webhook_received_at",
-            "created_at",
-        }
-        assert cols == expected
-
     def test_idempotency_unique_constraint(self) -> None:
         """The (repository_id, pull_request_number, head_sha) tuple must be unique."""
         constraints = AnalysisRun.__table__.constraints
-        uq = [c for c in constraints if hasattr(c, "columns") and len(getattr(c, "columns", [])) == 3]
         uq_col_sets = [
             {col.name for col in c.columns}
             for c in constraints
@@ -114,39 +163,16 @@ class TestAnalysisRunModel:
 
 
 class TestFindingModel:
-    def test_tablename(self) -> None:
-        assert Finding.__tablename__ == "findings"
-
-    def test_columns(self) -> None:
-        cols = {c.name for c in Finding.__table__.columns}
-        expected = {
-            "id", "analysis_run_id", "file_path", "line_start", "line_end",
-            "severity", "category", "title", "explanation", "remediation",
-            "confidence", "source", "raw_llm_category", "is_posted",
-            "created_at",
-        }
-        assert cols == expected
-
-    def test_severity_check(self) -> None:
+    @pytest.mark.parametrize(
+        "constraint_name",
+        ["ck_findings_severity", "ck_findings_confidence", "ck_findings_source"],
+    )
+    def test_check_constraints(self, constraint_name: str) -> None:
         check_names = [
             c.name for c in Finding.__table__.constraints
             if c.__class__.__name__ == "CheckConstraint"
         ]
-        assert "ck_findings_severity" in check_names
-
-    def test_confidence_check(self) -> None:
-        check_names = [
-            c.name for c in Finding.__table__.constraints
-            if c.__class__.__name__ == "CheckConstraint"
-        ]
-        assert "ck_findings_confidence" in check_names
-
-    def test_source_check(self) -> None:
-        check_names = [
-            c.name for c in Finding.__table__.constraints
-            if c.__class__.__name__ == "CheckConstraint"
-        ]
-        assert "ck_findings_source" in check_names
+        assert constraint_name in check_names
 
     def test_composite_index(self) -> None:
         indexes = {idx.name for idx in Finding.__table__.indexes}
@@ -159,49 +185,13 @@ class TestFindingModel:
         assert fks[0].target_fullname == "analysis_runs.id"
 
 
-class TestLlmUsageLogModel:
-    def test_tablename(self) -> None:
-        assert LlmUsageLog.__tablename__ == "llm_usage_log"
-
-    def test_columns(self) -> None:
-        cols = {c.name for c in LlmUsageLog.__table__.columns}
-        expected = {
-            "id", "analysis_run_id", "model_version", "input_tokens",
-            "output_tokens", "latency_ms", "cache_hit", "created_at",
-        }
-        assert cols == expected
-
-
 class TestDeadLetterLogModel:
-    def test_tablename(self) -> None:
-        assert DeadLetterLog.__tablename__ == "dead_letter_log"
-
-    def test_columns(self) -> None:
-        cols = {c.name for c in DeadLetterLog.__table__.columns}
-        expected = {
-            "id", "task_name", "task_id", "task_args", "exception_type",
-            "exception_message", "traceback", "retry_count", "resolved",
-            "created_at",
-        }
-        assert cols == expected
-
     def test_task_args_is_jsonb(self) -> None:
         col = DeadLetterLog.__table__.c.task_args
         assert col.type.__class__.__name__ == "JSONB"
 
 
 class TestWebhookEventLogModel:
-    def test_tablename(self) -> None:
-        assert WebhookEventLog.__tablename__ == "webhook_events_log"
-
-    def test_columns(self) -> None:
-        cols = {c.name for c in WebhookEventLog.__table__.columns}
-        expected = {
-            "id", "delivery_id", "event_type", "action",
-            "repository_full_name", "processed", "duplicate", "received_at",
-        }
-        assert cols == expected
-
     def test_delivery_id_unique(self) -> None:
         col = WebhookEventLog.__table__.c.delivery_id
         assert col.unique is True

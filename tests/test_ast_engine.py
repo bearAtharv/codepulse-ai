@@ -22,24 +22,25 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 
 class TestLanguageDetection:
-    def test_python(self):
-        assert detect_language("app.py") == "python"
-        assert detect_language("stubs.pyi") == "python"
+    @pytest.mark.parametrize(
+        "filename, expected",
+        [
+            ("app.py", "python"),
+            ("stubs.pyi", "python"),
+            ("app.js", "javascript"),
+            ("component.jsx", "javascript"),
+            ("module.mjs", "javascript"),
+            ("module.cjs", "javascript"),
+            ("app.ts", "typescript"),
+            ("component.tsx", "tsx"),
+        ],
+    )
+    def test_supported_language(self, filename, expected):
+        assert detect_language(filename) == expected
 
-    def test_javascript(self):
-        assert detect_language("app.js") == "javascript"
-        assert detect_language("component.jsx") == "javascript"
-        assert detect_language("module.mjs") == "javascript"
-        assert detect_language("module.cjs") == "javascript"
-
-    def test_typescript(self):
-        assert detect_language("app.ts") == "typescript"
-        assert detect_language("component.tsx") == "tsx"
-
-    def test_unsupported(self):
-        assert detect_language("main.go") is None
-        assert detect_language("App.java") is None
-        assert detect_language("image.png") is None
+    @pytest.mark.parametrize("filename", ["main.go", "App.java", "image.png"])
+    def test_unsupported_language(self, filename):
+        assert detect_language(filename) is None
 
     def test_unsupported_returns_no_findings(self):
         findings = analyze_chunk("package main", "main.go")
@@ -97,77 +98,65 @@ class TestPythonEvalExec:
 class TestPythonCommandInjection:
     """A03 — Shell command injection via subprocess/os."""
 
-    def test_os_system_detected(self):
-        code = "os.system(user_cmd)"
-        findings = analyze_chunk(code, "app.py")
-        assert any(f.rule_id == "OWASP-A03-COMMAND-INJECTION" for f in findings)
-
-    def test_subprocess_with_fstring_detected(self):
-        code = 'subprocess.run(f"echo {user_input}", shell=True)'
-        findings = analyze_chunk(code, "app.py")
-        assert any(f.rule_id == "OWASP-A03-COMMAND-INJECTION" for f in findings)
-
-    def test_subprocess_list_clean(self):
-        code = 'subprocess.run(["echo", "hello"], check=True)'
+    @pytest.mark.parametrize(
+        "code, should_fire",
+        [
+            ("os.system(user_cmd)", True),
+            ('subprocess.run(f"echo {user_input}", shell=True)', True),
+            ('subprocess.run(["echo", "hello"], check=True)', False),
+        ],
+    )
+    def test_command_injection(self, code: str, should_fire: bool) -> None:
         findings = [f for f in analyze_chunk(code, "app.py") if f.rule_id == "OWASP-A03-COMMAND-INJECTION"]
-        assert len(findings) == 0
+        assert bool(findings) is should_fire
 
 
 class TestPythonEmptyExcept:
     """A04 — Empty except blocks."""
 
-    def test_bare_except_pass_detected(self):
-        code = "try:\n    x()\nexcept:\n    pass"
-        findings = analyze_chunk(code, "app.py")
-        assert any(f.rule_id == "OWASP-A04-EMPTY-EXCEPT" for f in findings)
-
-    def test_except_exception_pass_detected(self):
-        code = "try:\n    x()\nexcept Exception:\n    pass"
-        findings = analyze_chunk(code, "app.py")
-        assert any(f.rule_id == "OWASP-A04-EMPTY-EXCEPT" for f in findings)
-
-    def test_except_with_logging_clean(self):
-        code = "try:\n    x()\nexcept Exception as e:\n    logger.error(e)\n    raise"
+    @pytest.mark.parametrize(
+        "code, should_fire",
+        [
+            ("try:\n    x()\nexcept:\n    pass", True),
+            ("try:\n    x()\nexcept Exception:\n    pass", True),
+            ("try:\n    x()\nexcept Exception as e:\n    logger.error(e)\n    raise", False),
+        ],
+    )
+    def test_empty_except(self, code: str, should_fire: bool) -> None:
         findings = [f for f in analyze_chunk(code, "app.py") if f.rule_id == "OWASP-A04-EMPTY-EXCEPT"]
-        assert len(findings) == 0
+        assert bool(findings) is should_fire
 
 
 class TestPythonHardcodedSecrets:
     """A02 — Hard-coded secrets."""
 
-    def test_password_detected(self):
-        code = 'password = "super_secret_123"'
-        findings = analyze_chunk(code, "app.py")
-        assert any(f.rule_id == "OWASP-A02-HARDCODED-SECRET" for f in findings)
-
-    def test_api_key_detected(self):
-        code = 'api_key = "sk-live-abc123"'
-        findings = analyze_chunk(code, "app.py")
-        assert any(f.rule_id == "OWASP-A02-HARDCODED-SECRET" for f in findings)
-
-    def test_env_var_clean(self):
-        code = 'import os\npassword = os.environ.get("PASSWORD")'
+    @pytest.mark.parametrize(
+        "code, should_fire",
+        [
+            ('password = "super_secret_123"', True),
+            ('api_key = "sk-live-abc123"', True),
+            ('import os\npassword = os.environ.get("PASSWORD")', False),
+        ],
+    )
+    def test_hardcoded_secrets(self, code: str, should_fire: bool) -> None:
         findings = [f for f in analyze_chunk(code, "app.py") if f.rule_id == "OWASP-A02-HARDCODED-SECRET"]
-        assert len(findings) == 0
+        assert bool(findings) is should_fire
 
 
 class TestPythonWeakCrypto:
     """A02 — Weak hash functions."""
 
-    def test_md5_detected(self):
-        code = "hashlib.md5(data)"
-        findings = analyze_chunk(code, "app.py")
-        assert any(f.rule_id == "OWASP-A02-WEAK-HASH" for f in findings)
-
-    def test_sha1_detected(self):
-        code = "hashlib.sha1(data)"
-        findings = analyze_chunk(code, "app.py")
-        assert any(f.rule_id == "OWASP-A02-WEAK-HASH" for f in findings)
-
-    def test_sha256_clean(self):
-        code = "hashlib.sha256(data)"
+    @pytest.mark.parametrize(
+        "code, should_fire",
+        [
+            ("hashlib.md5(data)", True),
+            ("hashlib.sha1(data)", True),
+            ("hashlib.sha256(data)", False),
+        ],
+    )
+    def test_weak_crypto(self, code: str, should_fire: bool) -> None:
         findings = [f for f in analyze_chunk(code, "app.py") if f.rule_id == "OWASP-A02-WEAK-HASH"]
-        assert len(findings) == 0
+        assert bool(findings) is should_fire
 
 
 class TestPythonDebugTrue:
@@ -221,48 +210,47 @@ class TestPythonDeserialization:
 class TestPythonLoggingSensitive:
     """A09 — Sensitive data in logging calls."""
 
-    def test_logging_password_detected(self):
-        code = "logger.info(password)"
-        findings = analyze_chunk(code, "app.py")
-        assert any(f.rule_id == "OWASP-A09-LOG-SENSITIVE" for f in findings)
-
-    def test_print_token_detected(self):
-        code = "print(access_token)"
-        findings = analyze_chunk(code, "app.py")
-        assert any(f.rule_id == "OWASP-A09-LOG-SENSITIVE" for f in findings)
-
-    def test_logging_username_clean(self):
-        code = 'logger.info("User logged in: %s", username)'
+    @pytest.mark.parametrize(
+        "code, should_fire",
+        [
+            ("logger.info(password)", True),
+            ("print(access_token)", True),
+            ('logger.info("User logged in: %s", username)', False),
+        ],
+    )
+    def test_logging_sensitive(self, code: str, should_fire: bool) -> None:
         findings = [f for f in analyze_chunk(code, "app.py") if f.rule_id == "OWASP-A09-LOG-SENSITIVE"]
-        assert len(findings) == 0
+        assert bool(findings) is should_fire
 
 
 class TestPythonJWTVerify:
     """A07 — JWT decode with verification disabled."""
 
-    def test_verify_false_detected(self):
-        code = 'jwt.decode(token, options={"verify_signature": False})'
-        findings = analyze_chunk(code, "app.py")
-        assert any(f.rule_id == "OWASP-A07-JWT-NO-VERIFY" for f in findings)
-
-    def test_normal_decode_clean(self):
-        code = 'jwt.decode(token, key, algorithms=["HS256"])'
+    @pytest.mark.parametrize(
+        "code, should_fire",
+        [
+            ('jwt.decode(token, options={"verify_signature": False})', True),
+            ('jwt.decode(token, key, algorithms=["HS256"])', False),
+        ],
+    )
+    def test_jwt_verify(self, code: str, should_fire: bool) -> None:
         findings = [f for f in analyze_chunk(code, "app.py") if f.rule_id == "OWASP-A07-JWT-NO-VERIFY"]
-        assert len(findings) == 0
+        assert bool(findings) is should_fire
 
 
 class TestPythonSSRF:
     """A10 — SSRF via user-controlled URL."""
 
-    def test_requests_get_variable_detected(self):
-        code = "requests.get(user_url)"
-        findings = analyze_chunk(code, "app.py")
-        assert any(f.rule_id == "OWASP-A10-SSRF" for f in findings)
-
-    def test_requests_get_literal_clean(self):
-        code = 'requests.get("https://api.example.com/data")'
+    @pytest.mark.parametrize(
+        "code, should_fire",
+        [
+            ("requests.get(user_url)", True),
+            ('requests.get("https://api.example.com/data")', False),
+        ],
+    )
+    def test_ssrf(self, code: str, should_fire: bool) -> None:
         findings = [f for f in analyze_chunk(code, "app.py") if f.rule_id == "OWASP-A10-SSRF"]
-        assert len(findings) == 0
+        assert bool(findings) is should_fire
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -273,15 +261,16 @@ class TestPythonSSRF:
 class TestPythonUnclosedResource:
     """Memory — open() without with statement."""
 
-    def test_bare_open_detected(self):
-        code = 'f = open("data.txt")\ndata = f.read()'
-        findings = analyze_chunk(code, "app.py")
-        assert any(f.rule_id == "MEM-PYTHON-UNCLOSED-RESOURCE" for f in findings)
-
-    def test_with_open_clean(self):
-        code = 'with open("data.txt") as f:\n    data = f.read()'
+    @pytest.mark.parametrize(
+        "code, should_fire",
+        [
+            ('f = open("data.txt")\ndata = f.read()', True),
+            ('with open("data.txt") as f:\n    data = f.read()', False),
+        ],
+    )
+    def test_unclosed_resource(self, code: str, should_fire: bool) -> None:
         findings = [f for f in analyze_chunk(code, "app.py") if f.rule_id == "MEM-PYTHON-UNCLOSED-RESOURCE"]
-        assert len(findings) == 0
+        assert bool(findings) is should_fire
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -292,34 +281,32 @@ class TestPythonUnclosedResource:
 class TestJSEval:
     """A03 — eval() in JavaScript."""
 
-    def test_eval_detected(self):
-        code = "eval(userInput)"
-        findings = analyze_chunk(code, "app.js")
-        assert any(f.rule_id == "OWASP-A03-EVAL" for f in findings)
-
-    def test_json_parse_clean(self):
-        code = "JSON.parse(data)"
+    @pytest.mark.parametrize(
+        "code, should_fire",
+        [
+            ("eval(userInput)", True),
+            ("JSON.parse(data)", False),
+        ],
+    )
+    def test_eval(self, code: str, should_fire: bool) -> None:
         findings = [f for f in analyze_chunk(code, "app.js") if f.rule_id == "OWASP-A03-EVAL"]
-        assert len(findings) == 0
+        assert bool(findings) is should_fire
 
 
 class TestJSSQLInjection:
     """A03 — SQL injection in JS."""
 
-    def test_concat_detected(self):
-        code = 'db.query("SELECT * FROM users WHERE id=" + userId)'
-        findings = analyze_chunk(code, "app.js")
-        assert any(f.rule_id == "OWASP-A03-SQL-INJECTION" for f in findings)
-
-    def test_template_literal_detected(self):
-        code = "db.query(`SELECT * FROM users WHERE id=${userId}`)"
-        findings = analyze_chunk(code, "app.js")
-        assert any(f.rule_id == "OWASP-A03-SQL-INJECTION" for f in findings)
-
-    def test_parameterised_clean(self):
-        code = 'db.query("SELECT * FROM users WHERE id=$1", [userId])'
+    @pytest.mark.parametrize(
+        "code, should_fire",
+        [
+            ('db.query("SELECT * FROM users WHERE id=" + userId)', True),
+            ("db.query(`SELECT * FROM users WHERE id=${userId}`)", True),
+            ('db.query("SELECT * FROM users WHERE id=$1", [userId])', False),
+        ],
+    )
+    def test_sql_injection(self, code: str, should_fire: bool) -> None:
         findings = [f for f in analyze_chunk(code, "app.js") if f.rule_id == "OWASP-A03-SQL-INJECTION"]
-        assert len(findings) == 0
+        assert bool(findings) is should_fire
 
 
 class TestJSInnerHTML:
@@ -330,13 +317,14 @@ class TestJSInnerHTML:
         findings = analyze_chunk(code, "app.js")
         assert any(f.rule_id == "OWASP-A03-INNERHTML" for f in findings)
 
-    def test_literal_clean(self):
-        code = 'element.innerHTML = "<p>hello</p>"'
-        findings = [f for f in analyze_chunk(code, "app.js") if f.rule_id == "OWASP-A03-INNERHTML"]
-        assert len(findings) == 0
-
-    def test_textcontent_clean(self):
-        code = "element.textContent = userContent"
+    @pytest.mark.parametrize(
+        "code",
+        [
+            'element.innerHTML = "<p>hello</p>"',
+            "element.textContent = userContent",
+        ],
+    )
+    def test_safe_dom_manipulation_clean(self, code: str) -> None:
         findings = [f for f in analyze_chunk(code, "app.js") if f.rule_id == "OWASP-A03-INNERHTML"]
         assert len(findings) == 0
 
@@ -344,43 +332,46 @@ class TestJSInnerHTML:
 class TestJSEmptyCatch:
     """A04 — Empty catch blocks."""
 
-    def test_empty_catch_detected(self):
-        code = "try { doSomething() } catch(e) {}"
-        findings = analyze_chunk(code, "app.js")
-        assert any(f.rule_id == "OWASP-A04-EMPTY-CATCH" for f in findings)
-
-    def test_catch_with_logging_clean(self):
-        code = "try { doSomething() } catch(e) { console.error(e) }"
+    @pytest.mark.parametrize(
+        "code, should_fire",
+        [
+            ("try { doSomething() } catch(e) {}", True),
+            ("try { doSomething() } catch(e) { console.error(e) }", False),
+        ],
+    )
+    def test_empty_catch(self, code: str, should_fire: bool) -> None:
         findings = [f for f in analyze_chunk(code, "app.js") if f.rule_id == "OWASP-A04-EMPTY-CATCH"]
-        assert len(findings) == 0
+        assert bool(findings) is should_fire
 
 
 class TestJSHardcodedSecrets:
     """A02 — Hard-coded secrets in JS."""
 
-    def test_const_secret_detected(self):
-        code = 'const apiSecret = "sk-live-abc123"'
-        findings = analyze_chunk(code, "app.js")
-        assert any(f.rule_id == "OWASP-A02-HARDCODED-SECRET" for f in findings)
-
-    def test_env_var_clean(self):
-        code = "const apiSecret = process.env.API_SECRET"
+    @pytest.mark.parametrize(
+        "code, should_fire",
+        [
+            ('const apiSecret = "sk-live-abc123"', True),
+            ("const apiSecret = process.env.API_SECRET", False),
+        ],
+    )
+    def test_hardcoded_secrets(self, code: str, should_fire: bool) -> None:
         findings = [f for f in analyze_chunk(code, "app.js") if f.rule_id == "OWASP-A02-HARDCODED-SECRET"]
-        assert len(findings) == 0
+        assert bool(findings) is should_fire
 
 
 class TestJSLoggingSensitive:
     """A09 — Sensitive data in console.log."""
 
-    def test_console_log_password_detected(self):
-        code = "console.log(password)"
-        findings = analyze_chunk(code, "app.js")
-        assert any(f.rule_id == "OWASP-A09-LOG-SENSITIVE" for f in findings)
-
-    def test_console_log_username_clean(self):
-        code = 'console.log("User logged in:", username)'
+    @pytest.mark.parametrize(
+        "code, should_fire",
+        [
+            ("console.log(password)", True),
+            ('console.log("User logged in:", username)', False),
+        ],
+    )
+    def test_logging_sensitive(self, code: str, should_fire: bool) -> None:
         findings = [f for f in analyze_chunk(code, "app.js") if f.rule_id == "OWASP-A09-LOG-SENSITIVE"]
-        assert len(findings) == 0
+        assert bool(findings) is should_fire
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -391,18 +382,20 @@ class TestJSLoggingSensitive:
 class TestJSEventListenerLeak:
     """Memory — addEventListener without removeEventListener."""
 
-    def test_no_remove_detected(self):
-        code = 'document.addEventListener("click", handleClick)'
-        findings = analyze_chunk(code, "app.js")
-        assert any(f.rule_id == "MEM-JS-EVENT-LISTENER-LEAK" for f in findings)
-
-    def test_with_remove_clean(self):
-        code = (
-            'document.addEventListener("click", handleClick)\n'
-            'document.removeEventListener("click", handleClick)'
-        )
+    @pytest.mark.parametrize(
+        "code, should_fire",
+        [
+            ('document.addEventListener("click", handleClick)', True),
+            (
+                'document.addEventListener("click", handleClick)\n'
+                'document.removeEventListener("click", handleClick)',
+                False,
+            ),
+        ],
+    )
+    def test_event_listener_leak(self, code: str, should_fire: bool) -> None:
         findings = [f for f in analyze_chunk(code, "app.js") if f.rule_id == "MEM-JS-EVENT-LISTENER-LEAK"]
-        assert len(findings) == 0
+        assert bool(findings) is should_fire
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -413,19 +406,16 @@ class TestJSEventListenerLeak:
 class TestTypeScript:
     """Verify TypeScript files get the same JS heuristics."""
 
-    def test_ts_eval_detected(self):
+    @pytest.mark.parametrize("filename", ["app.ts", "component.tsx"])
+    def test_eval_detected(self, filename: str) -> None:
         code = "eval(userInput)"
-        findings = analyze_chunk(code, "app.ts")
+        findings = analyze_chunk(code, filename)
         assert any(f.rule_id == "OWASP-A03-EVAL" for f in findings)
 
-    def test_tsx_eval_detected(self):
-        code = "eval(userInput)"
-        findings = analyze_chunk(code, "component.tsx")
-        assert any(f.rule_id == "OWASP-A03-EVAL" for f in findings)
-
-    def test_ts_sql_injection(self):
+    @pytest.mark.parametrize("filename", ["repo.ts", "component.tsx"])
+    def test_sql_injection(self, filename: str) -> None:
         code = "db.query(`SELECT * FROM t WHERE id=${id}`)"
-        findings = analyze_chunk(code, "repo.ts")
+        findings = analyze_chunk(code, filename)
         assert any(f.rule_id == "OWASP-A03-SQL-INJECTION" for f in findings)
 
 

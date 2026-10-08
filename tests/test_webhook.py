@@ -243,28 +243,19 @@ class TestEventFiltering:
         resp = client.post("/webhooks", content=body, headers=headers)
         assert resp.status_code == 200
 
-    def test_pr_closed_returns_200(self, client, mock_service) -> None:
-        body = json.dumps(make_pr_payload(action="closed")).encode()
+    @pytest.mark.parametrize("action", ["closed", "labeled"])
+    def test_filtered_pr_action_returns_200(
+        self, client, mock_service, action
+    ) -> None:
+        body = json.dumps(make_pr_payload(action=action)).encode()
         resp = client.post("/webhooks", content=body, headers=make_headers(body))
         assert resp.status_code == 200
 
-    def test_pr_labeled_returns_200(self, client, mock_service) -> None:
-        body = json.dumps(make_pr_payload(action="labeled")).encode()
-        resp = client.post("/webhooks", content=body, headers=make_headers(body))
-        assert resp.status_code == 200
-
-    def test_pr_opened_accepted(self, client, mock_service, mock_task) -> None:
-        body = json.dumps(make_pr_payload(action="opened")).encode()
-        resp = client.post("/webhooks", content=body, headers=make_headers(body))
-        assert resp.status_code == 202
-
-    def test_pr_synchronize_accepted(self, client, mock_service, mock_task) -> None:
-        body = json.dumps(make_pr_payload(action="synchronize")).encode()
-        resp = client.post("/webhooks", content=body, headers=make_headers(body))
-        assert resp.status_code == 202
-
-    def test_pr_reopened_accepted(self, client, mock_service, mock_task) -> None:
-        body = json.dumps(make_pr_payload(action="reopened")).encode()
+    @pytest.mark.parametrize("action", ["opened", "synchronize", "reopened"])
+    def test_accepted_pr_action_returns_202(
+        self, client, mock_service, mock_task, action
+    ) -> None:
+        body = json.dumps(make_pr_payload(action=action)).encode()
         resp = client.post("/webhooks", content=body, headers=make_headers(body))
         assert resp.status_code == 202
 

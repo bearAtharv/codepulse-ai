@@ -152,35 +152,21 @@ class TestCategoryRemapping:
             canonical, _ = remap_category(cat)
             assert canonical == cat
 
-    def test_sql_injection_remaps_to_a03(self):
-        canonical, raw = remap_category("SQL Injection")
-        assert canonical == "A03"
-        assert raw == "SQL Injection"
-
-    def test_weak_hashing_remaps_to_a02(self):
-        canonical, raw = remap_category("Weak Hashing")
-        assert canonical == "A02"
-        assert raw == "Weak Hashing"
-
-    def test_deserialization_remaps_to_a08(self):
-        canonical, raw = remap_category("Deserialization")
-        assert canonical == "A08"
-        assert raw == "Deserialization"
-
-    def test_xss_remaps_to_a03(self):
-        canonical, raw = remap_category("Cross-Site Scripting (XSS)")
-        assert canonical == "A03"
-        assert raw == "Cross-Site Scripting (XSS)"
-
-    def test_memory_leak_keyword_remaps(self):
-        canonical, raw = remap_category("Resource Leak")
-        assert canonical == "memory_leak"
-        assert raw == "Resource Leak"
-
-    def test_unknown_category_defaults_to_a04(self):
-        canonical, raw = remap_category("Something Completely Unknown")
-        assert canonical == "A04"
-        assert raw == "Something Completely Unknown"
+    @pytest.mark.parametrize(
+        "input_cat, expected_canonical",
+        [
+            ("SQL Injection", "A03"),
+            ("Weak Hashing", "A02"),
+            ("Deserialization", "A08"),
+            ("Cross-Site Scripting (XSS)", "A03"),
+            ("Resource Leak", "memory_leak"),
+            ("Something Completely Unknown", "A04"),
+        ],
+    )
+    def test_non_standard_category_remapped(self, input_cat, expected_canonical):
+        canonical, raw = remap_category(input_cat)
+        assert canonical == expected_canonical
+        assert raw == input_cat
 
     def test_original_preserved_in_raw(self):
         _, raw = remap_category("Weak Crypto Implementation")
