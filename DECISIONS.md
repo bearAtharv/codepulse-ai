@@ -102,3 +102,92 @@ that is beyond the scope of lightweight AST heuristics.
 signal for common SPA patterns (mount without unmount cleanup) where both calls
 typically live in the same component file. The LLM analysis path (Phase 4) can
 provide deeper cross-file reasoning to compensate.
+
+---
+
+## DEC-007: Slice 3 Refactoring — ASTFinding factory vs cross-language checker unification
+
+**Context:** The initial refactoring plan proposed deduplicating heuristic logic
+across Python and JavaScript by introducing shared AST checker abstractions (e.g.
+a unified call-expression visitor or cross-language rule checker).
+
+**What the plan promised vs what was delivered:**
+- *Plan:* Attempt cross-language checker unification to merge inspection logic.
+- *Delivered:* Added `ASTFinding.from_node()` classmethod to `base.py` and converted
+  all 21 finding instantiations across `python.py` and `javascript.py`. Cross-language
+  checker unification was deliberately skipped.
+
+**Rationale:**
+Tree-sitter grammars differ fundamentally between Python and JS/TS:
+- Python function calls are `call` nodes with `attribute` children.
+- JavaScript function calls are `call_expression` nodes with `member_expression` children.
+- Arguments in Python use `argument_list` with keyword arguments (`keyword_argument`),
+  whereas JS uses `arguments` with object properties or spread elements.
+
+Creating an artificial abstraction layer across distinct grammar trees introduces
+speculative indirection, impairs readability, and increases error risk without
+meaningful code reduction. Instead, `ASTFinding.from_node()` targeted the genuine
+duplication: repetitive extraction of `file_path`, `line_start`, and `line_end`
+from a node's `start_point` and `end_point`. This shrank each call site cleanly
+while preserving language-idiomatic AST analysis.
+
+---
+
+## DEC-008: Slice 4 Refactoring — Production MockLLMClient and LLM schema architecture
+
+**Context:** The initial refactoring plan proposed moving `MockLLMClient` out of
+production code into `tests/`, merging `LLMAnalysisResult` into other schema
+classes, and embedding category remapping into a Pydantic `@model_validator` on
+`LLMResponse`.
+
+**What the plan promised vs what was delivered:**
+- *Plan:* Move `MockLLMClient` to test directory, merge result classes, and use
+  `@model_validator` for category remapping.
+- *Delivered:* Retained `MockLLMClient` with full pattern-matching in
+  `src/codepulse/analysis/llm_client.py` as production code. Cleaned unused imports
+  (`MockLLMClient`, `LLMTokenUsage` in `llm_engine.py`) and normalized PEP 8 import
+  ordering. Result class merging and `@model_validator` remapping were skipped.
+
+**Rationale:**
+1. **MockLLMClient in production:** The project requires end-to-end operation in
+   Docker with `MOCK_LLM=true` without requiring a real Gemini API key or network
+   access. Webhook ingestion, Celery worker pipelines, and subsequent integration
+   testing (Phase 5+) rely on `get_llm_client(mock_llm=True)` returning realistic,
+   pattern-aware findings (OWASP A02, A03, A04, A08, memory leaks). Moving it to
+   tests would break containerized development and CI workflows.
+2. **Result class separation:** `LLMResponse` represents the raw structured output
+   from the Gemini API, whereas `LLMAnalysisResult` represents the outcome of the
+   full analysis engine (including status, prompt hash, and post-processed
+   findings). Conflating the two would violate single responsibility and mutate API
+   transport representations.
+3. **Explicit category remapping vs `@model_validator`:** Category remapping is a
+   pipeline business logic step (Section 3.4.4), not an input schema validation
+   rule. Running it in post-processing preserves the original LLM output for
+   auditing (`raw_category`) and allows clean fallback handling without rejecting
+   otherwise valid responses.
+
+---
+
+## DEC-009: Slice 6 Refactoring — Test parametrization strategy
+
+**Context:** The initial refactoring plan suggested aggressive test deduplication
+and deleting repetitive tests to shrink test file line counts.
+
+**What the plan promised vs what was delivered:**
+- *Plan:* Delete duplicate tests to reduce line count.
+- *Delivered:* Preserved all test cases and increased total tests from 184 to 192
+  via targeted `@pytest.mark.parametrize` tables across:
+  - Language detection extension mapping (`test_ast_engine.py`)
+  - Table and column verification across all 6 ORM models (`test_models.py`)
+  - Check constraint assertions on `Finding` (`test_models.py`)
+  - Heuristic fire/silent input-output tables (`test_ast_engine.py`)
+  - TypeScript and TSX duplicate evaluations (`test_ast_engine.py`)
+  - Category remapping non-standard inputs (`test_llm_engine.py`)
+  - Webhook PR event filtering and acceptance actions (`test_webhook.py`)
+  Verified test order independence under multiple random seeds using `pytest-randomly`.
+
+**Rationale:**
+Readability and regression safety take precedence over minimizing line count.
+Parametrizing genuine duplicates into tabular inputs makes expected behavior more
+transparent, prevents test suite decay, and maintains high test density without
+obscuring failure diagnostics.
