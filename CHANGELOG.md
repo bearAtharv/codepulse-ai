@@ -2,6 +2,38 @@
 
 All notable changes to CodePulse AI are documented here.
 
+## [Unreleased] — Codebase Refactor & Bug Fixes (Slices 1–6)
+
+### Fixed
+- **Readiness probe HTTP 503** (`src/codepulse/ingestion/app.py`): `/health/ready`
+  now correctly returns HTTP 503 (was 200) when Redis or PostgreSQL is unreachable.
+- **Event loop unblocking**: `readiness()` changed from `async def` to sync `def`
+  so synchronous database and Redis pings execute in FastAPI threadpool.
+- **Configuration caching**: `get_settings()` now cached via `@lru_cache(maxsize=1)`
+  in `src/codepulse/config.py` with an autouse cache-clearer fixture in `tests/conftest.py`.
+- **Datetime round-trip eliminated**: `src/codepulse/ingestion/webhook.py` passes
+  datetime objects directly to `create_analysis_run()`, serializing to ISO 8601 only
+  for Celery kwargs.
+
+### Changed / Refactored
+- **Module consolidation (Slice 1)**:
+  - Inlined `models/base.py` into `models/tables.py`.
+  - Inlined `ingestion/signature.py` into `ingestion/webhook.py`.
+  - Moved session/redis dependency providers from `ingestion/dependencies.py` to
+    `persistence/database.py`.
+  - Merged `python_memory.py` into `heuristics/python.py` and `javascript_memory.py`
+    into `heuristics/javascript.py`.
+  - Merged prompt builder from `analysis/llm_prompt.py` into `analysis/llm_engine.py`.
+- **Dead code removal (Slice 2)**: Removed unused `GEMINI_RESPONSE_SCHEMA`,
+  `SUPPORTED_LANGUAGES`, unused `source: bytes` parameters from heuristics, and dead imports.
+- **Deduplication (Slice 3)**: Added `ASTFinding.from_node()` factory method to `base.py`
+  and refactored all 21 finding instantiations across Python and JavaScript heuristics.
+- **LLM engine consolidation (Slice 4)**: Cleaned unused imports in `llm_engine.py` while
+  retaining full pattern-matching `MockLLMClient` in production `llm_client.py`.
+- **Test parameterization (Slice 6)**: Parameterized model metadata tests, language
+  detection, webhook event actions, category remapping, TS/TSX evaluations, and
+  heuristic fire/silent pairs. Total test count increased from 181 to 192 (0 failures).
+
 ## [Unreleased] — Phase 4: LLM Analysis Engine (Gemini)
 
 ### Added

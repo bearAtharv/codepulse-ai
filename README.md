@@ -289,47 +289,43 @@ PYTHONPATH=src python -m pytest tests/ -v
 
 ```
 src/codepulse/
-├── config.py                 # Pydantic settings (env vars)
+├── config.py                 # Pydantic settings (env vars, cached via @lru_cache)
 ├── models/
-│   ├── base.py               # SQLAlchemy DeclarativeBase
-│   └── tables.py             # All 6 ORM models
+│   ├── __init__.py           # Re-exports Base + all table models
+│   └── tables.py             # SQLAlchemy DeclarativeBase + all 6 ORM models
 ├── persistence/
-│   └── database.py           # Engine + session factory (cached)
+│   └── database.py           # Engine + session factory + get_db_session/get_redis_client
 ├── ingestion/
-│   ├── app.py                # FastAPI application + health probes
-│   ├── webhook.py            # POST /webhooks handler
-│   ├── signature.py          # HMAC-SHA256 verification
-│   ├── service.py            # DB operations (upsert, create, log)
-│   └── dependencies.py       # FastAPI dependency injection
+│   ├── app.py                # FastAPI application + liveness & readiness (503 on failure)
+│   ├── webhook.py            # POST /webhooks handler + inlined HMAC-SHA256 verification
+│   └── service.py            # DB operations (upsert repo, create run, log event)
 ├── worker/
 │   ├── celery_app.py         # Celery app configuration
 │   └── tasks.py              # Task stubs (Phase 6 wiring)
 ├── analysis/
 │   ├── ast_engine.py         # analyze_chunk() entry point
 │   ├── languages.py          # Extension → tree-sitter parser registry
-│   └── heuristics/
-│       ├── base.py           # ASTFinding dataclass + tree helpers
-│       ├── python_owasp.py   # 11 Python OWASP heuristics
-│       ├── python_memory.py  # Python memory leak heuristics
-│       ├── javascript_owasp.py  # 6 JS/TS OWASP heuristics
-│       └── javascript_memory.py # JS/TS memory leak heuristics
-│   ├── llm_engine.py         # analyze_llm() entry point
-│   ├── llm_client.py         # GeminiClient + MockLLMClient
-│   ├── llm_prompt.py         # Prompt construction + cache hash
+│   ├── heuristics/
+│   │   ├── base.py           # ASTFinding dataclass + from_node() factory + tree helpers
+│   │   ├── python.py         # 12 Python OWASP and memory-leak heuristics
+│   │   └── javascript.py     # 7 JS/TS OWASP and memory-leak heuristics
+│   ├── llm_engine.py         # analyze_llm() + prompt builder + SHA-256 prompt hash
+│   ├── llm_client.py         # GeminiClient + production pattern-matching MockLLMClient
 │   └── llm_schemas.py        # Pydantic response schemas + OWASP remap
 ├── aggregation/              # Phase 5: dedup + review posting
 └── common/                   # Shared utilities
 
 tests/
+├── conftest.py               # Shared fixtures + autouse get_settings cache clearer
 ├── fixtures/
 │   ├── python_vulnerable.py  # Known-vulnerable Python code
 │   ├── python_clean.py       # Known-clean Python code
 │   ├── javascript_vulnerable.js  # Known-vulnerable JS code
 │   └── javascript_clean.js   # Known-clean JS code
-├── test_models.py            # Phase 1: 30 model tests
-├── test_webhook.py           # Phase 2: 28 webhook tests
-├── test_ast_engine.py        # Phase 3: 69 AST engine tests
-└── test_llm_engine.py        # Phase 4: 54 LLM engine tests
+├── test_models.py            # Phase 1 + Slice 6: 30 model tests (parameterized)
+├── test_webhook.py           # Phase 2 + Slice 5-6: 31 webhook & health tests
+├── test_ast_engine.py        # Phase 3 + Slice 6: 77 AST engine tests (parameterized)
+└── test_llm_engine.py        # Phase 4 + Slice 6: 54 LLM engine tests (parameterized)
 ```
 
 ---
