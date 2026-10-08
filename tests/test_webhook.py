@@ -419,3 +419,52 @@ class TestHealthEndpoints:
         resp = client.get("/health/live")
         assert resp.status_code == 200
         assert resp.json()["status"] == "alive"
+
+    def test_readiness_healthy(self, client) -> None:
+        """Returns 200 with status 'ready' when Redis and Postgres are reachable."""
+        mock_redis = MagicMock()
+        mock_redis.ping.return_value = True
+        mock_engine = MagicMock()
+
+        with (
+            patch("codepulse.ingestion.app.get_redis_client", return_value=mock_redis),
+            patch("codepulse.ingestion.app.get_engine", return_value=mock_engine),
+        ):
+            resp = client.get("/health/ready")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "ready"
+
+    def test_readiness_redis_down(self, client) -> None:
+        """Returns 503 when Redis is unreachable."""
+        mock_engine = MagicMock()
+
+        with (
+            patch(
+                "codepulse.ingestion.app.get_redis_client",
+                side_effect=ConnectionError("Connection refused"),
+            ),
+            patch("codepulse.ingestion.app.get_engine", return_value=mock_engine),
+        ):
+            resp = client.get("/health/ready")
+        assert resp.status_code == 503
+        body = resp.json()
+        assert body["status"] == "not ready"
+        assert any("Redis" in e for e in body["errors"])
+
+    def test_readiness_postgres_down(self, client) -> None:
+        """Returns 503 when Postgres is unreachable."""
+        mock_redis = MagicMock()
+        mock_redis.ping.return_value = True
+
+        with (
+            patch("codepulse.ingestion.app.get_redis_client", return_value=mock_redis),
+            patch(
+                "codepulse.ingestion.app.get_engine",
+                side_effect=ConnectionError("Connection refused"),
+            ),
+        ):
+            resp = client.get("/health/ready")
+        assert resp.status_code == 503
+        body = resp.json()
+        assert body["status"] == "not ready"
+        assert any("PostgreSQL" in e for e in body["errors"])

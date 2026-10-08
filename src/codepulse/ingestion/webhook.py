@@ -123,7 +123,7 @@ async def handle_webhook(
         return Response(status_code=200)
 
     # ── Step 5: Upsert repository + create analysis run ──────────────────
-    webhook_received_at = datetime.now(timezone.utc).isoformat()
+    webhook_received_at = datetime.now(timezone.utc)
 
     repo_id = service.upsert_repository(db, payload["repository"], installation_id)
 
@@ -149,7 +149,7 @@ async def handle_webhook(
             "head_sha": head_sha,
             "base_sha": base_sha,
             "pr_author": pr_author,
-            "webhook_received_at": webhook_received_at,
+            "webhook_received_at": webhook_received_at.isoformat(),
             "analysis_run_id": str(run_id),
         },
         queue="cp-high",

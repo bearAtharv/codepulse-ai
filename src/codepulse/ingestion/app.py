@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from codepulse.persistence.database import get_engine, get_redis_client
@@ -24,8 +25,13 @@ async def liveness() -> dict[str, str]:
 
 
 @app.get("/health/ready")
-async def readiness() -> dict:
-    """Readiness probe — checks Redis and PostgreSQL connectivity (Section 8.5)."""
+def readiness() -> JSONResponse:
+    """Readiness probe — checks Redis and PostgreSQL connectivity (Section 8.5).
+
+    Uses a plain ``def`` (not ``async def``) so that the synchronous
+    Redis/Postgres calls run in a threadpool and don't block the event loop.
+    Returns HTTP 503 when any dependency is unreachable.
+    """
     errors: list[str] = []
 
     try:
@@ -42,5 +48,8 @@ async def readiness() -> dict:
         errors.append(f"PostgreSQL: {exc}")
 
     if errors:
-        return {"status": "not ready", "errors": errors}
-    return {"status": "ready"}
+        return JSONResponse(
+            status_code=503,
+            content={"status": "not ready", "errors": errors},
+        )
+    return JSONResponse(content={"status": "ready"})

@@ -92,7 +92,7 @@ def create_analysis_run(
     head_sha: str,
     base_sha: str,
     pr_author: str,
-    webhook_received_at: str,
+    webhook_received_at: datetime,
 ) -> uuid_mod.UUID | None:
     """Create an ``analysis_runs`` row with ``status='pending'``.
 
@@ -102,7 +102,6 @@ def create_analysis_run(
 
     Returns the new run's UUID, or ``None`` if the row already existed.
     """
-    received_dt = datetime.fromisoformat(webhook_received_at)
     insert_stmt = (
         pg_insert(AnalysisRun.__table__)
         .values(
@@ -112,7 +111,7 @@ def create_analysis_run(
             base_sha=base_sha,
             pr_author=pr_author,
             status="pending",
-            webhook_received_at=received_dt,
+            webhook_received_at=webhook_received_at,
         )
         .on_conflict_do_nothing(constraint="uq_analysis_runs_repo_pr_sha")
         .returning(AnalysisRun.__table__.c.id)
