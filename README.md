@@ -234,6 +234,32 @@ The `analysis_runs` table has a unique constraint on `(repository_id, pull_reque
 - **Error handling** — retry-once on schema validation failure, then fallback to `llm_error` status
 - **54 unit tests** covering prompt construction, schema parsing, category remapping, mock client patterns, output validation, error handling, and end-to-end integration
 
+### Phase 5 — Aggregation, Deduplication & GitHub Review Posting
+
+- **`aggregate_and_post(ast_findings, llm_findings, diff_text, repo_context)`** — pipeline orchestrator combining AST and LLM findings into a single atomic GitHub PR review
+- **Unified Finding model** (`src/codepulse/aggregation/models.py`) adapting `ASTFinding` and `LLMFindingItem` into normalized dataclasses
+- **Deduplication & collision merging** (`src/codepulse/aggregation/dedup.py`) on `(file_path, line_start, category, title)`:
+  - Higher confidence finding wins
+  - Losing source is attributed as `"Also detected by {source}."`
+  - Source marked as `"merged"`
+- **Severity sorting & 256-finding cap**:
+  - Prioritizes critical findings first (`critical` > `high` > `medium` > `low` > `info`), then file path and line number
+  - Strictly enforces invariant that **critical findings are never dropped** while non-critical findings remain
+- **Diff line mapping** (`src/codepulse/aggregation/line_mapping.py`):
+  - Parses unified diff hunks (`@@ -old,count +new,count @@`)
+  - Maps multi-line findings (`line_start`/`line_end`)
+  - Remaps context-line findings to nearest modified line with an explanatory note
+  - Marks out-of-hunk findings as unmapped for top-level display
+- **Review comment and summary formatting**:
+  - Inline comments with severity emoji badges (🔴, 🟠, 🟡, 🔵, ℹ️), OWASP labels, and GitHub `suggestion` blocks
+  - Top-level review body with severity breakdown, analysis metrics table, truncation notices, and collapsible methodology disclosure
+- **GitHub Review API client & mock mode** (`src/codepulse/aggregation/github_poster.py`):
+  - Posts atomic reviews via `POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews` with `event="COMMENT"` (§3.6.1, §3.6.2)
+  - `MockGitHubPoster` strictly validates payload keys (`event`, `body`, `comments[].path/line/side/body`) and records reviews in memory under `MOCK_GITHUB=true`
+  - Production `GitHubPoster` uses `httpx` with GitHub App bearer token authentication
+- **Phase 6 stubs**: Tier 2 escalation check (§3.4.1) and PostgreSQL persistence (§3.7.1) documented in [DEC-010](DECISIONS.md)
+- **33 unit tests** covering adapters, collision merging, sorting, 256 cap invariant, line mapping, comment formatting, summary generation, payload validation, and end-to-end posting
+
 ---
 
 ## Getting Started
@@ -312,7 +338,15 @@ src/codepulse/
 │   ├── llm_engine.py         # analyze_llm() + prompt builder + SHA-256 prompt hash
 │   ├── llm_client.py         # GeminiClient + production pattern-matching MockLLMClient
 │   └── llm_schemas.py        # Pydantic response schemas + OWASP remap
-├── aggregation/              # Phase 5: dedup + review posting
+├── aggregation/              # Phase 5: dedup + line mapping + review posting
+│   ├── __init__.py           # Re-exports aggregate_and_post, Finding, posters, models
+│   ├── comments.py           # Inline comment markdown formatting + suggestion blocks
+│   ├── dedup.py              # Deduplication, confidence merge, 256-finding cap truncation
+│   ├── engine.py             # aggregate_and_post() orchestrator + Tier 2 & persistence stubs
+│   ├── github_poster.py      # GitHub Review API poster + MockGitHubPoster
+│   ├── line_mapping.py       # Diff hunk parser + line position remapping
+│   ├── models.py             # Finding, RepoContext, DeduplicationResult, AggregationResult
+│   └── summary.py            # Top-level review body composition + methodology disclosure
 └── common/                   # Shared utilities
 
 tests/
@@ -325,7 +359,8 @@ tests/
 ├── test_models.py            # Phase 1 + Slice 6: 30 model tests (parameterized)
 ├── test_webhook.py           # Phase 2 + Slice 5-6: 31 webhook & health tests
 ├── test_ast_engine.py        # Phase 3 + Slice 6: 77 AST engine tests (parameterized)
-└── test_llm_engine.py        # Phase 4 + Slice 6: 54 LLM engine tests (parameterized)
+├── test_llm_engine.py        # Phase 4 + Slice 6: 54 LLM engine tests (parameterized)
+└── test_aggregation.py       # Phase 5: 33 aggregation, dedup, line mapping & posting tests
 ```
 
 ---

@@ -191,3 +191,36 @@ Readability and regression safety take precedence over minimizing line count.
 Parametrizing genuine duplicates into tabular inputs makes expected behavior more
 transparent, prevents test suite decay, and maintains high test density without
 obscuring failure diagnostics.
+
+---
+
+## DEC-010: Phase 5 Aggregation, Review Posting, and Architecture Stubs
+
+**Context:** Phase 5 integrates findings from AST heuristics (Phase 3) and LLM analysis
+(Phase 4) into unified findings, handles deduplication, diff line mapping, and publishes
+an atomic PR review to the GitHub Pull Request Review API (§3.5, §3.6).
+
+**Decisions:**
+1. **Atomic PR Review API & MockGitHubPoster:**
+   - Review comments are posted atomically as a single review via
+     `POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews` with `event="COMMENT"` (§3.6.1, §3.6.2).
+   - A `MockGitHubPoster` is implemented in production code (`src/codepulse/aggregation/github_poster.py`),
+     active by default under `MOCK_GITHUB=true`. It strictly validates top-level keys
+     (`event`, `body`, `comments`) and comment item keys (`path`, `line`, `side`, `body`)
+     and records reviews in memory for deterministic test assertions.
+2. **256-Comment Cap Truncation Invariant:**
+   - GitHub limits PR reviews to 256 inline comments (§3.6.4).
+   - Findings are sorted by severity (`critical` > `high` > `medium` > `low` > `info`),
+     then file path, then line number.
+   - Truncation strictly enforces the invariant that **no critical finding is ever dropped**
+     while lower-severity findings remain in the review. If total findings exceed 256,
+     lower-severity findings are omitted and a truncation notice is included in the summary body.
+3. **Phase 6 Stubs for Celery Orchestration & Persistence:**
+   - *Tier 2 Escalation:* Per §3.4.1, critical findings with low or medium confidence warrant
+     re-analysis via `gemini-2.5-pro`. In Phase 5, `check_tier2_escalation()` identifies
+     candidates and returns a boolean indicator, with a `TODO (Phase 6)` to spawn an escalation
+     subtask on the `cp-analysis` Celery queue before posting.
+   - *PostgreSQL Persistence:* Per §3.7.1, findings and analysis run records must be saved
+     in PostgreSQL. In Phase 5, `persist_findings_stub()` defines the persistence contract with
+     a `TODO (Phase 6)` to execute within the Celery task database session lifecycle.
+

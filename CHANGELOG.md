@@ -2,6 +2,47 @@
 
 All notable changes to CodePulse AI are documented here.
 
+## [Unreleased] — Phase 5: Finding Aggregation, Deduplication, and GitHub Review Posting
+
+### Added
+- **Pipeline orchestrator** (`src/codepulse/aggregation/engine.py`):
+  - `aggregate_and_post()` entry point coordinating finding normalization, deduplication, diff line mapping, markdown formatting, and atomic review delivery.
+  - Stubs for Tier 2 escalation (`check_tier2_escalation()` per §3.4.1) and persistence (`persist_findings_stub()` per §3.7.1), with Celery integration deferred to Phase 6 and documented in DEC-010.
+- **Unified Finding models & adapters** (`src/codepulse/aggregation/models.py`):
+  - `Finding` dataclass standardizing fields across AST and LLM engines.
+  - `Finding.from_ast_finding()` and `Finding.from_llm_finding()` adapter methods.
+  - `RepoContext` holding PR metadata, runtime duration, and model version.
+  - `DeduplicationResult` and `AggregationResult` containers.
+- **Deduplication and collision resolution** (`src/codepulse/aggregation/dedup.py`):
+  - Deduplicates on `(file_path, line_start, category, title)`.
+  - Confidence-weighted merging: higher confidence finding wins; lower-confidence source is attributed (`"Also detected by {source}."`); source marked as `"merged"`.
+  - Severity sorting (`critical` > `high` > `medium` > `low` > `info`), followed by file path and line number.
+  - Truncation to GitHub's 256-comment review limit with strict invariant: **critical findings are never dropped** while non-critical findings remain.
+- **Diff parsing and line position mapping** (`src/codepulse/aggregation/line_mapping.py`):
+  - `parse_unified_diff()` extracts per-file hunk headers, modified lines (`+`), and context lines (` `).
+  - Multi-line findings placed on `line_end` with `start_line` set.
+  - Context-only findings remapped to nearest modified line in the hunk with an explanatory footnote.
+  - Findings outside all hunks or in unchanged files marked `is_in_diff=False`.
+- **Review comment and summary formatting** (`src/codepulse/aggregation/comments.py`, `src/codepulse/aggregation/summary.py`):
+  - Inline comments with severity emoji badges (🔴, 🟠, 🟡, 🔵, ℹ️), OWASP category code, explanation, and markdown `suggestion` blocks for remediation.
+  - Top-level review body with badge overview, analysis metrics table, truncation notices, unmapped findings section, and collapsible `<details>` methodology disclosure.
+- **GitHub Review API client and mock mode** (`src/codepulse/aggregation/github_poster.py`):
+  - `GitHubReviewPayload` and `ReviewCommentPayload` Pydantic models for `POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews` with `event="COMMENT"` (§3.6.1, §3.6.2).
+  - `MockGitHubPoster` verifying payload keys (`event`, `body`, `comments[].path/line/side/body`) and recording reviews in memory under `MOCK_GITHUB=true`.
+  - `GitHubPoster` production client using `httpx` with GitHub App bearer token authentication.
+  - Factory `get_github_poster()` reading `mock_github` configuration.
+- **Tests** — 33 new unit tests in `tests/test_aggregation.py`:
+  - 2 model adapter tests (AST and LLM).
+  - 3 deduplication and collision merging tests (confidence precedence, explanation attribution).
+  - 1 multi-level sorting test (severity, file, line).
+  - 2 truncation cap invariant tests (ensuring 0 critical findings dropped under 256 cap and custom caps).
+  - 6 diff parsing and line mapping tests (added lines, multi-line ranges, context remapping, out-of-hunk).
+  - 2 comment formatting tests (suggestion block, remediation fallback, metadata footer).
+  - 3 review summary composition tests (overview table, truncation alert, clean PR).
+  - 7 mock poster tests (payload key validation, rejection of missing event/body/comments/path/line/side/body, factory).
+  - 5 Tier 2 escalation & persistence stub tests.
+  - 1 end-to-end `aggregate_and_post()` test with mock poster payload inspection.
+
 ## [Unreleased] — Codebase Refactor & Bug Fixes (Slices 1–6)
 
 ### Fixed
