@@ -939,3 +939,21 @@ def test_aggregate_and_post_end_to_end():
     line_12_comment = next(c for c in payload["comments"] if c["line"] == 12)
     assert "```suggestion" in line_12_comment["body"]
     assert "execute_query(sql, (data,))" in line_12_comment["body"]
+
+
+def test_all_emitted_severities_accepted_by_db_constraint():
+    """Verify that every severity Phase 5 can emit is valid under ck_findings_severity."""
+    from codepulse.aggregation.models import SEVERITY_ORDER
+    from codepulse.models.tables import Finding as DBFinding
+
+    constraint = next(
+        c
+        for c in DBFinding.__table__.constraints
+        if c.__class__.__name__ == "CheckConstraint" and c.name == "ck_findings_severity"
+    )
+    sql_text = str(constraint.sqltext)
+
+    # Every severity recognized and emitted by Phase 5 must be in the DB constraint
+    for severity in SEVERITY_ORDER.keys():
+        assert f"'{severity}'" in sql_text, f"Severity {severity!r} is not allowed by DB constraint!"
+

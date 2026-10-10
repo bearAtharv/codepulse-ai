@@ -41,7 +41,6 @@ def compose_review_summary(
     high = counts.get("high", 0)
     medium = counts.get("medium", 0)
     low = counts.get("low", 0)
-    info = counts.get("info", 0)
 
     total_findings = len(findings)
 
@@ -63,8 +62,6 @@ def compose_review_summary(
             f"🟡 **Medium:** {medium} | "
             f"🔵 **Low:** {low}"
         )
-        if info:
-            badge_line += f" | ℹ️ **Info:** {info}"
         parts.extend([
             badge_line,
             "",

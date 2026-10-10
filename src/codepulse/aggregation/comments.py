@@ -17,7 +17,6 @@ SEVERITY_BADGES: dict[str, str] = {
     "high": "🟠 **High**",
     "medium": "🟡 **Medium**",
     "low": "🔵 **Low**",
-    "info": "ℹ️ **Info**",
 }
 
 

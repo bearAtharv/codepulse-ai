@@ -18,7 +18,6 @@ SEVERITY_ORDER: dict[str, int] = {
     "high": 1,
     "medium": 2,
     "low": 3,
-    "info": 4,
 }
 
 CONFIDENCE_ORDER: dict[str, int] = {

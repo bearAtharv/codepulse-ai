@@ -210,12 +210,16 @@ an atomic PR review to the GitHub Pull Request Review API (§3.5, §3.6).
      and records reviews in memory for deterministic test assertions.
 2. **256-Comment Cap Truncation Invariant:**
    - GitHub limits PR reviews to 256 inline comments (§3.6.4).
-   - Findings are sorted by severity (`critical` > `high` > `medium` > `low` > `info`),
+   - Findings are sorted by severity (`critical` > `high` > `medium` > `low`),
      then file path, then line number.
    - Truncation strictly enforces the invariant that **no critical finding is ever dropped**
      while lower-severity findings remain in the review. If total findings exceed 256,
      lower-severity findings are omitted and a truncation notice is included in the summary body.
-3. **Phase 6 Stubs for Celery Orchestration & Persistence:**
+3. **Severity Alignment with Database & Architecture Constraints:**
+   - The `findings` table strictly enforces `ck_findings_severity`: `severity IN ('critical', 'high', 'medium', 'low')`.
+   - The LLM response schema `Severity` enum and architecture doc §3.4.3 / §3.7.1 also define exactly those 4 severities.
+   - Defensive references to `info` severity were removed from Phase 5 (`SEVERITY_ORDER`, badges, summaries) to prevent any mismatch where unhandled `info` findings would be rejected by Postgres with an `IntegrityError` during persistence.
+4. **Phase 6 Stubs for Celery Orchestration & Persistence:**
    - *Tier 2 Escalation:* Per §3.4.1, critical findings with low or medium confidence warrant
      re-analysis via `gemini-2.5-pro`. In Phase 5, `check_tier2_escalation()` identifies
      candidates and returns a boolean indicator, with a `TODO (Phase 6)` to spawn an escalation
@@ -223,4 +227,10 @@ an atomic PR review to the GitHub Pull Request Review API (§3.5, §3.6).
    - *PostgreSQL Persistence:* Per §3.7.1, findings and analysis run records must be saved
      in PostgreSQL. In Phase 5, `persist_findings_stub()` defines the persistence contract with
      a `TODO (Phase 6)` to execute within the Celery task database session lifecycle.
+5. **Components Unverified Without Real External Credentials:**
+   The following components operate against mock implementations or stubs and remain unverified against live third-party APIs until production credentials are provided:
+   - **`GitHubPoster` against real GitHub API:** `POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews` requires a live GitHub App installation token or personal access token to verify GitHub's actual HTTP response formatting, rate limiting (403/5xx), and permission boundaries.
+   - **GitHub App Installation-Token Exchange:** Authenticating as a GitHub App via RS256 JWT exchange (`POST /app/installations/{installation_id}/access_tokens` per §3.1.2) requires a valid private key PEM file (`GITHUB_APP_PRIVATE_KEY_PATH`) and App ID.
+   - **`GeminiClient` against real Gemini API:** Live inference with `gemini-3.7-flash` requires a valid `GEMINI_API_KEY` to verify upstream latency, network timeouts, real token quotas, and live structured output compliance under actual API conditions.
+
 

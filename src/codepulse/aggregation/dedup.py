@@ -91,7 +91,7 @@ def deduplicate_and_sort(
             existing.suggested_fix = winner.suggested_fix or existing.suggested_fix
             existing.raw_category = winner.raw_category or existing.raw_category
 
-    # Sort: Severity (critical -> high -> medium -> low -> info), then file_path, then line_start
+    # Sort: Severity (critical -> high -> medium -> low), then file_path, then line_start
     sorted_findings = sorted(
         dedup_map.values(),
         key=lambda item: (
