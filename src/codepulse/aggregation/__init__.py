@@ -20,6 +20,7 @@ from codepulse.aggregation.engine import (
     aggregate_and_post,
     check_tier2_escalation,
     persist_findings_stub,
+    run_tier2_escalation,
 )
 from codepulse.aggregation.github_poster import (
     BaseGitHubPoster,
@@ -38,6 +39,12 @@ from codepulse.aggregation.models import (
     DeduplicationResult,
     Finding,
     RepoContext,
+    normalize_category,
+)
+from codepulse.aggregation.persistence import (
+    persist_analysis_results,
+    record_llm_usage,
+    update_analysis_run_status,
 )
 from codepulse.aggregation.summary import compose_review_summary
 
@@ -59,6 +66,12 @@ __all__ = [
     "format_finding_comment",
     "get_github_poster",
     "map_findings_to_diff_positions",
+    "normalize_category",
     "parse_unified_diff",
+    "persist_analysis_results",
     "persist_findings_stub",
+    "record_llm_usage",
+    "run_tier2_escalation",
+    "update_analysis_run_status",
 ]
+

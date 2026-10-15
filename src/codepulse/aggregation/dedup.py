@@ -44,7 +44,22 @@ def deduplicate_and_sort(
 
     for f in findings:
         key = (f.file_path, f.line_start, f.category, f.title)
-        if key not in dedup_map:
+        existing = dedup_map.get(key)
+        if existing is None:
+            # Per §3.6.4: If AST and LLM both flag the same line with the same
+            # category (even with different phrasing in title), merge them.
+            for candidate in dedup_map.values():
+                if (
+                    candidate.file_path == f.file_path
+                    and candidate.line_start == f.line_start
+                    and candidate.category == f.category
+                    and candidate.source != f.source
+                    and candidate.source != "merged"
+                ):
+                    existing = candidate
+                    break
+
+        if existing is None:
             # Create a copy so we do not mutate callers original objects
             dedup_map[key] = Finding(
                 file_path=f.file_path,
@@ -61,7 +76,6 @@ def deduplicate_and_sort(
                 suggested_fix=f.suggested_fix,
             )
         else:
-            existing = dedup_map[key]
             merged_count += 1
             # Confidence comparison
             existing_conf_val = CONFIDENCE_ORDER.get(existing.confidence.lower(), 0)
@@ -83,6 +97,7 @@ def deduplicate_and_sort(
                 merged_explanation = winner.explanation
 
             # Update existing with winning metadata and merged status
+            existing.title = winner.title
             existing.severity = winner.severity
             existing.confidence = winner.confidence
             existing.explanation = merged_explanation

@@ -233,4 +233,20 @@ an atomic PR review to the GitHub Pull Request Review API (§3.5, §3.6).
    - **GitHub App Installation-Token Exchange:** Authenticating as a GitHub App via RS256 JWT exchange (`POST /app/installations/{installation_id}/access_tokens` per §3.1.2) requires a valid private key PEM file (`GITHUB_APP_PRIVATE_KEY_PATH`) and App ID.
    - **`GeminiClient` against real Gemini API:** Live inference with `gemini-3.7-flash` requires a valid `GEMINI_API_KEY` to verify upstream latency, network timeouts, real token quotas, and live structured output compliance under actual API conditions.
 
+---
 
+## DEC-011: Cross-source finding deduplication on (file_path, line_start, category)
+
+**Context:** Section 3.6.4 (Batching and Deduplication) states:
+> *"Before posting, findings are deduplicated on `(file_path, line_start, category, title)`. If AST and LLM both flag the same line with the same category, the finding with higher confidence is kept, and the other's explanation is appended as 'Also detected by {source}'."*
+
+There is an inherent conflict between these two sentences:
+1. The literal deduplication key is specified as a 4-field tuple: `(file_path, line_start, category, title)`.
+2. However, AST heuristics and LLM prompts will almost never generate the exact same `title` string for an issue (e.g., AST produces `"SQL Injection via string concatenation"` while LLM produces `"Potential SQL injection vulnerability detected"`).
+
+If the 4-field key including `title` were strictly enforced across different sources, cross-engine collision resolution would never trigger, resulting in duplicate comments posted to GitHub for the same line and category.
+
+**Decision:** Recorded as a judgment call. Retained the 4-field key `(file_path, line_start, category, title)` for identical findings from the same source, but relaxed the title requirement when matching findings across different sources: findings from different sources (AST vs. LLM) that share `(file_path, line_start, category)` are merged per §3.6.4. The merged finding retains the winning (higher confidence) title, attributes the losing source (`"Also detected by {source}."`), and sets `source = "merged"`.
+
+**Known Limitations:**
+- LLM line numbers can occasionally be off by a line or two compared to exact AST token spans (e.g., pointing to a function header or variable assignment rather than the nested call expression). Exact line matching (`line_start`) means that if the LLM reports line 42 and AST reports line 43, they will not merge. A fuzzy line window was considered but deferred to avoid incorrectly merging distinct adjacent vulnerabilities.

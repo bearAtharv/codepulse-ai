@@ -4,35 +4,44 @@ Coordinates the end-to-end post-analysis workflow (Sections 3.5 & 3.6):
 1. Normalizes findings from AST and LLM engines into unified Finding models.
 2. Deduplicates colliding findings on (file, line, category, title) with confidence merge.
 3. Sorts findings by severity (critical first) and truncates at GitHub's 256-comment limit.
-4. Maps findings to diff hunk lines (line, start_line, side).
-5. Composes a markdown summary and formats inline comment suggestions.
-6. Stubs for Tier 2 escalation (§3.4.1) and PostgreSQL persistence (§3.7.1).
+4. Runs inline Tier 2 escalation via gemini-2.5-pro for critical low/medium-confidence findings (§3.4.1).
+5. Maps findings to diff hunk lines (line, start_line, side).
+6. Composes a markdown summary and formats inline comment suggestions.
 7. Posts atomic review to GitHub PR Review API (or records in MockGitHubPoster).
+8. Persists deduplicated findings and run statistics to PostgreSQL (§3.7.1).
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any, Sequence
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any, Sequence
 
 from codepulse.aggregation.comments import format_finding_comment
 from codepulse.aggregation.dedup import MAX_REVIEW_COMMENTS, deduplicate_and_sort
 from codepulse.aggregation.github_poster import BaseGitHubPoster, get_github_poster
 from codepulse.aggregation.line_mapping import map_findings_to_diff_positions
 from codepulse.aggregation.models import (
+    CONFIDENCE_ORDER,
     AggregationResult,
     Finding,
     RepoContext,
 )
+from codepulse.aggregation.persistence import persist_analysis_results
 from codepulse.aggregation.summary import compose_review_summary
 from codepulse.analysis.heuristics.base import ASTFinding
+from codepulse.analysis.llm_client import BaseLLMClient
+from codepulse.analysis.llm_engine import DiffChunk, LLMAnalysisResult, analyze_llm
 from codepulse.analysis.llm_schemas import LLMFindingItem
 from codepulse.config import Settings, get_settings
+
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
 
-# ── Stubs for Phase 6 (Celery & Persistence Integration) ───────────────
+# ── Tier 2 Escalation & Persistence Wiring (Phase 6) ───────────────────
 
 
 def check_tier2_escalation(findings: Sequence[Finding]) -> bool:
@@ -41,14 +50,11 @@ def check_tier2_escalation(findings: Sequence[Finding]) -> bool:
     Per §3.4.1 and DEC-010:
     Critical severity findings with low or medium confidence trigger
     re-analysis by the larger escalation model.
-
-    TODO (Phase 6): Spawn Celery subtask on 'cp-analysis' queue running
-    escalation prompt with gemini-2.5-pro before final review posting.
     """
     for f in findings:
         if f.severity.lower() == "critical" and f.confidence.lower() in ("low", "medium"):
             logger.info(
-                "[STUB] Tier 2 escalation warranted for finding %s:%d (%s, conf=%s)",
+                "Tier 2 escalation warranted for finding %s:%d (%s, conf=%s)",
                 f.file_path,
                 f.line_start,
                 f.title,
@@ -58,27 +64,153 @@ def check_tier2_escalation(findings: Sequence[Finding]) -> bool:
     return False
 
 
+def run_tier2_escalation(
+    findings: Sequence[Finding],
+    diff_text: str,
+    repo_name: str,
+    *,
+    chunks: Sequence[DiffChunk] | None = None,
+    llm_client: BaseLLMClient | None = None,
+    settings: Settings | None = None,
+) -> tuple[list[Finding], LLMAnalysisResult | None]:
+    """Run inline Tier 2 escalation with gemini-2.5-pro for critical low/medium findings."""
+    if not check_tier2_escalation(findings):
+        return list(findings), None
+
+    if settings is None:
+        settings = get_settings()
+
+    escalation_model = settings.gemini_escalation_model
+    affected_files = {
+        f.file_path
+        for f in findings
+        if f.severity.lower() == "critical" and f.confidence.lower() in ("low", "medium")
+    }
+
+    if chunks:
+        escalation_chunks = [c for c in chunks if c.file_path in affected_files]
+    else:
+        escalation_chunks = [
+            DiffChunk(
+                file_path=fp,
+                hunk_header="@@ -1,1 +1,1 @@",
+                content=diff_text or f"# Escalation context for {fp}",
+            )
+            for fp in sorted(affected_files)
+        ]
+
+    if not escalation_chunks:
+        return list(findings), None
+
+    logger.info(
+        "Running inline Tier 2 escalation with model=%s on %d chunk(s)",
+        escalation_model,
+        len(escalation_chunks),
+    )
+    escalation_result = analyze_llm(
+        chunks=escalation_chunks,
+        repo_name=repo_name,
+        language="python",
+        client=llm_client,
+        model=escalation_model,
+        mock_llm=settings.mock_llm,
+        api_key=settings.gemini_api_key,
+    )
+
+    escalated_by_file_cat: dict[tuple[str, str], LLMFindingItem] = {}
+    for ef in escalation_result.findings:
+        escalated_by_file_cat[(ef.file_path, ef.category)] = ef
+
+    updated: list[Finding] = []
+    for f in findings:
+        if f.severity.lower() == "critical" and f.confidence.lower() in ("low", "medium"):
+            match = escalated_by_file_cat.get((f.file_path, f.category))
+            if match is not None:
+                new_conf = (
+                    match.confidence.value.lower()
+                    if hasattr(match.confidence, "value")
+                    else str(match.confidence).lower()
+                )
+                if CONFIDENCE_ORDER.get(new_conf, 0) >= CONFIDENCE_ORDER.get(f.confidence.lower(), 0):
+                    f.confidence = new_conf
+                tag = f"*(Verified via Tier 2 escalation: `{escalation_model}`)*"
+                if tag not in f.explanation:
+                    f.explanation = f"{f.explanation}\n\n{tag}"
+        updated.append(f)
+
+    return updated, escalation_result
+
+
 def persist_findings_stub(
     findings: Sequence[Finding],
     review_id: int | str | None,
     context: RepoContext,
-) -> None:
-    """Stub for persisting analysis findings to PostgreSQL (§3.7.1).
+    *,
+    db: Session | None = None,
+    analysis_run_id: str | None = None,
+    chunks_total: int = 0,
+    chunks_completed: int = 0,
+    review_posted_at: datetime | None = None,
+) -> int:
+    """Persist findings to PostgreSQL when db session and analysis_run_id are supplied."""
+    if db is not None and analysis_run_id is not None:
+        posted_ts = review_posted_at or (
+            datetime.now(timezone.utc) if review_id is not None else None
+        )
+        return persist_analysis_results(
+            db=db,
+            analysis_run_id=analysis_run_id,
+            findings=findings,
+            files_analyzed=context.files_analyzed,
+            chunks_total=chunks_total,
+            chunks_completed=chunks_completed,
+            analysis_duration_ms=context.analysis_duration_ms,
+            github_review_id=review_id,
+            review_posted_at=posted_ts,
+        )
 
-    TODO (Phase 6): Save findings to 'findings' table and update 'analysis_runs'
-    record with total_findings, severity counts, and review_posted_at within the
-    Celery task DB session lifecycle.
-    """
     logger.debug(
-        "[STUB] persist_findings_stub: %d findings for %s#%d (review_id=%s)",
+        "persist_findings_stub (no DB session): %d findings for %s#%d (review_id=%s)",
         len(findings),
         context.repository_full_name,
         context.pull_request_number,
         review_id,
     )
+    return 0
 
 
 # ── Pipeline Orchestrator ──────────────────────────────────────────────
+
+
+def normalize_repo_context(
+    repo_context: RepoContext | dict[str, Any],
+    settings: Settings | None = None,
+) -> RepoContext:
+    """Convert a dictionary or RepoContext into a canonical RepoContext."""
+    if isinstance(repo_context, RepoContext):
+        return repo_context
+
+    if settings is None:
+        settings = get_settings()
+
+    repo_full_name = repo_context.get(
+        "repository_full_name",
+        repo_context.get("repo_full_name", "unknown/unknown"),
+    )
+    pr_number = repo_context.get(
+        "pull_request_number",
+        repo_context.get("pr_number", 0),
+    )
+    return RepoContext(
+        repository_full_name=repo_full_name,
+        pull_request_number=int(pr_number),
+        head_sha=str(repo_context.get("head_sha", "")),
+        base_sha=str(repo_context.get("base_sha", "")),
+        pr_author=str(repo_context.get("pr_author", "")),
+        files_analyzed=int(repo_context.get("files_analyzed", 1)),
+        analysis_duration_ms=int(repo_context.get("analysis_duration_ms", 0)),
+        model_version=str(repo_context.get("model_version", settings.gemini_model)),
+    )
 
 
 def aggregate_and_post(
@@ -88,6 +220,9 @@ def aggregate_and_post(
     repo_context: RepoContext | dict[str, Any],
     *,
     poster: BaseGitHubPoster | None = None,
+    llm_client: BaseLLMClient | None = None,
+    db: Session | None = None,
+    analysis_run_id: str | None = None,
     settings: Settings | None = None,
     max_findings: int = MAX_REVIEW_COMMENTS,
 ) -> AggregationResult:
@@ -99,6 +234,9 @@ def aggregate_and_post(
         diff_text: Unified diff string for the pull request.
         repo_context: Context metadata (repository name, PR number, etc.).
         poster: Optional explicit GitHub review poster (defaults to configured poster).
+        llm_client: Optional explicit LLM client for Tier 2 escalation.
+        db: Optional SQLAlchemy Session for persisting results.
+        analysis_run_id: Optional UUID string of the AnalysisRun record.
         settings: Optional app settings override.
         max_findings: Cap on inline comments (defaults to 256).
 
@@ -108,28 +246,7 @@ def aggregate_and_post(
     if settings is None:
         settings = get_settings()
 
-    # Normalize repo_context
-    if isinstance(repo_context, dict):
-        repo_full_name = repo_context.get(
-            "repository_full_name",
-            repo_context.get("repo_full_name", "unknown/unknown"),
-        )
-        pr_number = repo_context.get(
-            "pull_request_number",
-            repo_context.get("pr_number", 0),
-        )
-        context = RepoContext(
-            repository_full_name=repo_full_name,
-            pull_request_number=int(pr_number),
-            head_sha=str(repo_context.get("head_sha", "")),
-            base_sha=str(repo_context.get("base_sha", "")),
-            pr_author=str(repo_context.get("pr_author", "")),
-            files_analyzed=int(repo_context.get("files_analyzed", 1)),
-            analysis_duration_ms=int(repo_context.get("analysis_duration_ms", 0)),
-            model_version=str(repo_context.get("model_version", settings.gemini_model)),
-        )
-    else:
-        context = repo_context
+    context = normalize_repo_context(repo_context, settings)
 
     # 1. Adapt findings into unified Finding objects
     unified_findings: list[Finding] = []
@@ -152,14 +269,26 @@ def aggregate_and_post(
     # 2. Deduplicate, merge collisions, sort by severity, truncate to max_findings
     dedup_result = deduplicate_and_sort(unified_findings, max_findings=max_findings)
 
-    # 3. Map findings to diff positions
+    # 3. Tier 2 escalation (inline with gemini-2.5-pro if critical + low/medium confidence)
+    escalation_needed = check_tier2_escalation(dedup_result.findings)
+    if escalation_needed:
+        escalated_findings, _ = run_tier2_escalation(
+            dedup_result.findings,
+            diff_text,
+            context.repository_full_name,
+            llm_client=llm_client,
+            settings=settings,
+        )
+        dedup_result.findings = escalated_findings
+
+    # 4. Map findings to diff positions
     mapped_findings = map_findings_to_diff_positions(dedup_result.findings, diff_text)
 
-    # 4. Partition inline comments vs unmapped findings
+    # 5. Partition inline comments vs unmapped findings
     inline_findings = [f for f in mapped_findings if f.is_in_diff and f.diff_line is not None]
     unmapped_findings = [f for f in mapped_findings if not f.is_in_diff or f.diff_line is None]
 
-    # 5. Format inline comment payloads
+    # 6. Format inline comment payloads
     comments_payload: list[dict[str, Any]] = []
     for f in inline_findings:
         comment: dict[str, Any] = {
@@ -173,7 +302,7 @@ def aggregate_and_post(
             comment["start_side"] = f.diff_side
         comments_payload.append(comment)
 
-    # 6. Compose review body summary
+    # 7. Compose review body summary
     review_body = compose_review_summary(
         dedup_result=dedup_result,
         files_analyzed=context.files_analyzed,
@@ -182,7 +311,7 @@ def aggregate_and_post(
         unmapped_findings=unmapped_findings,
     )
 
-    # 7. Construct final GitHub Review API payload
+    # 8. Construct final GitHub Review API payload
     review_payload: dict[str, Any] = {
         "event": "COMMENT",
         "body": review_body,
@@ -190,9 +319,6 @@ def aggregate_and_post(
     }
     if context.head_sha:
         review_payload["commit_id"] = context.head_sha
-
-    # 8. Check Tier 2 escalation (stub)
-    escalation_needed = check_tier2_escalation(mapped_findings)
 
     # 9. Post review via GitHub poster
     if poster is None:
@@ -206,8 +332,14 @@ def aggregate_and_post(
     )
     review_id = review_response.get("id")
 
-    # 10. Persistence stub
-    persist_findings_stub(mapped_findings, review_id, context)
+    # 10. Persist findings if DB session provided
+    persist_findings_stub(
+        mapped_findings,
+        review_id,
+        context,
+        db=db,
+        analysis_run_id=analysis_run_id,
+    )
 
     # 11. Compile summary statistics
     summary_stats = {
