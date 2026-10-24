@@ -6,11 +6,14 @@ LLM analysis engine (LLMFindingItem) into a common dataclass shape.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any
 
 from codepulse.analysis.heuristics.base import ASTFinding
 from codepulse.analysis.llm_schemas import LLMFindingItem, VALID_CATEGORIES, remap_category
+
+logger = logging.getLogger(__name__)
 
 
 SEVERITY_ORDER: dict[str, int] = {
@@ -27,23 +30,43 @@ CONFIDENCE_ORDER: dict[str, int] = {
 }
 
 
-def normalize_category(raw_category: str) -> str:
+class NormalizedCategory(str):
+    """Canonical category string that preserves the raw category when remapped/fallen back."""
+
+    raw_category: str | None
+
+    def __new__(cls, canonical: str, raw_category: str | None = None) -> NormalizedCategory:
+        instance = super().__new__(cls, canonical)
+        instance.raw_category = raw_category
+        return instance
+
+
+def normalize_category(raw_category: str) -> NormalizedCategory:
     """Normalize a category string to canonical OWASP code (A01-A10) or memory_leak.
 
     Guarantees output is <= 20 chars and within VALID_CATEGORIES.
-    Unknown categories fall back safely via keyword remapping or default to A04.
+    Unknown categories fall back safely via keyword remapping or default to A04,
+    preserving the original string in raw_category and logging a warning.
     """
     raw = raw_category.strip()
     if ":" in raw:
         prefix = raw.split(":", 1)[0].strip()
         if prefix in VALID_CATEGORIES:
-            return prefix
+            return NormalizedCategory(prefix, raw_category=None)
     if raw.lower() in ("memory leak", "memory_leak"):
-        return "memory_leak"
+        return NormalizedCategory("memory_leak", raw_category=None)
     if raw in VALID_CATEGORIES:
-        return raw
-    canonical, _ = remap_category(raw)
-    return canonical
+        return NormalizedCategory(raw, raw_category=None)
+
+    canonical, remapped_raw = remap_category(raw)
+    if canonical == "A04" and (remapped_raw is not None or raw not in ("A04", "a04")):
+        logger.warning(
+            "Unknown category %r could not be matched; falling back to A04",
+            raw_category,
+        )
+        return NormalizedCategory("A04", raw_category=raw_category)
+
+    return NormalizedCategory(canonical, raw_category=remapped_raw)
 
 
 @dataclass
@@ -78,13 +101,13 @@ class Finding:
             line_start=ast_f.line_start,
             line_end=ast_f.line_end,
             severity=ast_f.severity.lower(),
-            category=canonical_cat,
+            category=str(canonical_cat),
             title=ast_f.title,
             explanation=ast_f.explanation,
             remediation=ast_f.remediation,
             confidence=ast_f.confidence.lower(),
             source="ast",
-            raw_category=None,
+            raw_category=canonical_cat.raw_category,
             suggested_fix=None,
         )
 

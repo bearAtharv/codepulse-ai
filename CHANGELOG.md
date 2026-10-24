@@ -2,6 +2,32 @@
 
 All notable changes to CodePulse AI are documented here.
 
+## [Unreleased] — Phase 6: Celery Task Orchestration, Pipeline & Worker Service (Phases 6a & 6b)
+
+### Added
+- **Worker pipeline tasks & Celery application** (`src/codepulse/worker/tasks.py`, `src/codepulse/worker/celery_app.py`):
+  - `orchestrate_pr_analysis`: Coordinates the full PR review pipeline via Celery task orchestration.
+  - `fetch_pr_diff`: Fetches PR diffs and file contents via GitHub REST API / mock fetcher.
+  - `preprocess_and_chunk`: Performs file filtering and AST/LLM chunking; skips review with `status="skipped"` when all files are filtered.
+  - `analyze_ast_task`: Runs AST heuristics over chunks in parallel on the `cp-analysis` queue.
+  - `analyze_llm_task`: Runs Gemini LLM analysis over chunks in parallel on the `cp-analysis` queue.
+  - `aggregate_findings`: Celery chord callback executing inline Tier 2 escalation and finding deduplication on `cp-aggregate`.
+  - `post_review_to_github`: Posts atomic review comment to GitHub API; catches and logs posting failures so downstream persistence still runs.
+  - `persist_results`: Sole task responsible for database persistence using a real PostgreSQL session.
+  - Celery application configuring Redis broker/result backend and task routing across `cp-high`, `cp-analysis`, and `cp-aggregate`.
+- **Diff fetching and preprocessing** (`src/codepulse/ingestion/diff_fetcher.py`, `src/codepulse/ingestion/preprocessor.py`):
+  - `DiffFetcher` with GitHub App RS256 JWT auth token exchange and deterministic `MockDiffFetcher`.
+  - `Preprocessor` filtering non-source / vendor / lock files and chunking changed files by AST top-level function/class definitions.
+- **Database persistence service** (`src/codepulse/aggregation/persistence.py`):
+  - `persist_analysis_results()` providing idempotent persistence for findings, `llm_usage_log` telemetry, and `analysis_runs` status/counters.
+- **Docker Compose worker service**:
+  - Added `worker` container to `docker-compose.yml` consuming `cp-high,cp-analysis,cp-aggregate` with `MOCK_LLM=true` and `MOCK_GITHUB=true`.
+- **Category normalization with fallback logging** (`src/codepulse/aggregation/models.py`):
+  - `normalize_category()` safely handles unrecognized categories with fallback to `A04`, preserves `raw_category` for auditing, and logs a warning.
+- **Tests**:
+  - `tests/test_phase6a.py`: 27 unit & integration tests for diff fetching, preprocessor filtering, AST chunking, and database persistence idempotency.
+  - `tests/test_pipeline.py`: 14 unit & integration tests covering individual Celery tasks with mocks, PostgreSQL-backed eager pipeline execution, posting failure resilience, and all-filtered diff skipping.
+
 ## [Unreleased] — Phase 5: Finding Aggregation, Deduplication, and GitHub Review Posting
 
 ### Added

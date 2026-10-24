@@ -14,8 +14,8 @@ CodePulse AI is a GitHub App that automatically reviews pull requests using a co
 | **2** | Webhook ingestion service | ✅ Done |
 | **3** | AST analysis engine (Python, JS/TS) | ✅ Done |
 | **4** | LLM analysis engine (Gemini) | ✅ Done |
-| **5** | Aggregation, dedup, GitHub review posting | 🔲 Planned |
-| **6** | Celery orchestration wiring | 🔲 Planned |
+| **5** | Aggregation, dedup, GitHub review posting | ✅ Done |
+| **6** | Celery orchestration wiring | ✅ Done |
 | **7** | Failure handling (retry, circuit-breaker, dead-letter) | 🔲 Planned |
 | **8** | Kubernetes/Helm + observability | 🔲 Planned |
 
@@ -243,7 +243,7 @@ The `analysis_runs` table has a unique constraint on `(repository_id, pull_reque
   - Losing source is attributed as `"Also detected by {source}."`
   - Source marked as `"merged"`
 - **Severity sorting & 256-finding cap**:
-  - Prioritizes critical findings first (`critical` > `high` > `medium` > `low` > `info`), then file path and line number
+  - Prioritizes critical findings first (`critical` > `high` > `medium` > `low`), then file path and line number
   - Strictly enforces invariant that **critical findings are never dropped** while non-critical findings remain
 - **Diff line mapping** (`src/codepulse/aggregation/line_mapping.py`):
   - Parses unified diff hunks (`@@ -old,count +new,count @@`)
@@ -251,14 +251,35 @@ The `analysis_runs` table has a unique constraint on `(repository_id, pull_reque
   - Remaps context-line findings to nearest modified line with an explanatory note
   - Marks out-of-hunk findings as unmapped for top-level display
 - **Review comment and summary formatting**:
-  - Inline comments with severity emoji badges (🔴, 🟠, 🟡, 🔵, ℹ️), OWASP labels, and GitHub `suggestion` blocks
+  - Inline comments with severity emoji badges (🔴, 🟠, 🟡, 🔵), OWASP labels, and GitHub `suggestion` blocks
   - Top-level review body with severity breakdown, analysis metrics table, truncation notices, and collapsible methodology disclosure
 - **GitHub Review API client & mock mode** (`src/codepulse/aggregation/github_poster.py`):
   - Posts atomic reviews via `POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews` with `event="COMMENT"` (§3.6.1, §3.6.2)
   - `MockGitHubPoster` strictly validates payload keys (`event`, `body`, `comments[].path/line/side/body`) and records reviews in memory under `MOCK_GITHUB=true`
   - Production `GitHubPoster` uses `httpx` with GitHub App bearer token authentication
-- **Phase 6 stubs**: Tier 2 escalation check (§3.4.1) and PostgreSQL persistence (§3.7.1) documented in [DEC-010](DECISIONS.md)
 - **33 unit tests** covering adapters, collision merging, sorting, 256 cap invariant, line mapping, comment formatting, summary generation, payload validation, and end-to-end posting
+
+### Phase 6 — Celery Task Orchestration, Pipeline & Worker Service
+
+- **Phase 6a — Diff Ingestion, Preprocessing & Persistence**:
+  - **`DiffFetcher`** (`src/codepulse/ingestion/diff_fetcher.py`): Fetches PR diffs and file contents via GitHub REST API with App authentication and RS256 JWT generation; includes deterministic mock mode for local testing.
+  - **Preprocessor & Chunking** (`src/codepulse/ingestion/preprocessor.py`): Filters generated, vendor, and lock files, checks size/line thresholds, and chunks changed files by top-level AST function/class definitions for AST heuristics and LLM prompts.
+  - **PostgreSQL Persistence** (`src/codepulse/aggregation/persistence.py`): `persist_analysis_results()` atomically and idempotently stores findings and updates `analysis_runs` status and counters.
+  - **Category Normalization** (`src/codepulse/aggregation/models.py`): Normalizes AST and LLM categories to canonical OWASP keys (`A01`–`A10`, `memory_leak`), falls back safely to `A04` with warnings and preserves `raw_category`.
+  - **27 unit & integration tests** (`tests/test_phase6a.py`) validating diff fetching, preprocessing, chunking, and database persistence.
+- **Phase 6b — Celery Task Orchestration & Worker Service**:
+  - **Celery Application** (`src/codepulse/worker/celery_app.py`): Configures Redis broker/backend and queue routing for `cp-high`, `cp-analysis`, and `cp-aggregate`.
+  - **8 Celery Pipeline Tasks** (`src/codepulse/worker/tasks.py`):
+    1. `orchestrate_pr_analysis`: Coordinates the PR analysis workflow via task chaining and chord construction.
+    2. `fetch_pr_diff`: Fetches PR diff and file contents via `DiffFetcher`.
+    3. `preprocess_and_chunk`: Filters files, handles all-filtered diffs with `status="skipped"`, and chunks diff content.
+    4. `analyze_ast_task`: Runs AST analysis engine over chunks on `cp-analysis`.
+    5. `analyze_llm_task`: Runs Gemini LLM analysis engine over chunks on `cp-analysis`.
+    6. `aggregate_findings`: Celery chord callback executing inline Tier 2 escalation and finding deduplication on `cp-aggregate`.
+    7. `post_review_to_github`: Posts atomic review to GitHub API, resiliently catching posting errors to prevent finding loss.
+    8. `persist_results`: Sole persistence task calling `persist_analysis_results` with a real DB session.
+  - **Docker Compose Worker**: Dedicated worker container consuming `cp-high,cp-analysis,cp-aggregate` queues.
+  - **14 unit & integration tests** (`tests/test_pipeline.py`) covering task execution, eager-mode full chain, posting failure recovery, and skipped empty diffs.
 
 ---
 
@@ -324,10 +345,12 @@ src/codepulse/
 ├── ingestion/
 │   ├── app.py                # FastAPI application + liveness & readiness (503 on failure)
 │   ├── webhook.py            # POST /webhooks handler + inlined HMAC-SHA256 verification
-│   └── service.py            # DB operations (upsert repo, create run, log event)
+│   ├── service.py            # DB operations (upsert repo, create run, log event)
+│   ├── diff_fetcher.py       # GitHub PR diff & content fetcher (App auth + JWT + mock mode)
+│   └── preprocessor.py       # File filtering, threshold checks & AST/LLM chunking
 ├── worker/
-│   ├── celery_app.py         # Celery app configuration
-│   └── tasks.py              # Task stubs (Phase 6 wiring)
+│   ├── celery_app.py         # Celery app configuration (queues: cp-high, cp-analysis, cp-aggregate)
+│   └── tasks.py              # Celery tasks (orchestration, diff, chunk, AST/LLM chord, aggregate, post, persist)
 ├── analysis/
 │   ├── ast_engine.py         # analyze_chunk() entry point
 │   ├── languages.py          # Extension → tree-sitter parser registry
@@ -338,14 +361,15 @@ src/codepulse/
 │   ├── llm_engine.py         # analyze_llm() + prompt builder + SHA-256 prompt hash
 │   ├── llm_client.py         # GeminiClient + production pattern-matching MockLLMClient
 │   └── llm_schemas.py        # Pydantic response schemas + OWASP remap
-├── aggregation/              # Phase 5: dedup + line mapping + review posting
+├── aggregation/              # Phase 5 & 6a: dedup + line mapping + review posting + persistence
 │   ├── __init__.py           # Re-exports aggregate_and_post, Finding, posters, models
 │   ├── comments.py           # Inline comment markdown formatting + suggestion blocks
 │   ├── dedup.py              # Deduplication, confidence merge, 256-finding cap truncation
-│   ├── engine.py             # aggregate_and_post() orchestrator + Tier 2 & persistence stubs
+│   ├── engine.py             # aggregate_and_post() orchestrator + Tier 2 escalation
 │   ├── github_poster.py      # GitHub Review API poster + MockGitHubPoster
 │   ├── line_mapping.py       # Diff hunk parser + line position remapping
-│   ├── models.py             # Finding, RepoContext, DeduplicationResult, AggregationResult
+│   ├── models.py             # Finding, RepoContext, DeduplicationResult, AggregationResult, normalize_category
+│   ├── persistence.py        # persist_analysis_results() (idempotent DB persistence)
 │   └── summary.py            # Top-level review body composition + methodology disclosure
 └── common/                   # Shared utilities
 
@@ -360,7 +384,9 @@ tests/
 ├── test_webhook.py           # Phase 2 + Slice 5-6: 31 webhook & health tests
 ├── test_ast_engine.py        # Phase 3 + Slice 6: 77 AST engine tests (parameterized)
 ├── test_llm_engine.py        # Phase 4 + Slice 6: 54 LLM engine tests (parameterized)
-└── test_aggregation.py       # Phase 5: 33 aggregation, dedup, line mapping & posting tests
+├── test_aggregation.py       # Phase 5: 33 aggregation, dedup, line mapping & posting tests
+├── test_phase6a.py           # Phase 6a: 27 diff fetcher, preprocessor & persistence tests
+└── test_pipeline.py          # Phase 6b: 14 Celery pipeline, chord flow & worker tests
 ```
 
 ---

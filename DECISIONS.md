@@ -250,3 +250,28 @@ If the 4-field key including `title` were strictly enforced across different sou
 
 **Known Limitations:**
 - LLM line numbers can occasionally be off by a line or two compared to exact AST token spans (e.g., pointing to a function header or variable assignment rather than the nested call expression). Exact line matching (`line_start`) means that if the LLM reports line 42 and AST reports line 43, they will not merge. A fuzzy line window was considered but deferred to avoid incorrectly merging distinct adjacent vulnerabilities.
+
+---
+
+## DEC-012: Phase 6b Celery Chord Callback Pattern and Inline Tier 2 Escalation
+
+**Context:** Sections 3.2, 3.5.1, and 10.1 specify the end-to-end task workflow:
+1. `orchestrate_pr_analysis` orchestrates fetching diff, preprocessing, parallel AST and LLM analysis, finding aggregation/deduplication, posting to GitHub, and database persistence.
+2. AST and LLM analysis tasks run in parallel across chunks on the `cp-analysis` queue.
+3. When critical findings with low or medium confidence are detected, Tier 2 escalation re-analyzes those chunks using `gemini-2.5-pro` before review comments are posted.
+
+**Problem:**
+In distributed Celery architectures, calling `.get()` or blocking on child subtasks inside an executing worker task is a known anti-pattern that risks worker pool deadlock: when all worker threads are blocked waiting for subtask completion, the child tasks cannot be picked up and processed.
+
+**Decisions:**
+1. **Celery Chord & Callback Chain:**
+   - The analysis stage is structured as a Celery `chord`: the header executes a group of tasks (`analyze_ast_task` and `analyze_llm_task` for each chunk) in parallel on `cp-analysis`.
+   - The chord callback is a 3-task chain: `aggregate_findings.s(...) | post_review_to_github.s() | persist_results.s()`.
+   - Celery passes the accumulated results list from the chord header group as the first positional argument to `aggregate_findings`.
+   - Subsequent tasks receive the dictionary output of the preceding task as their first argument.
+2. **Inline Tier 2 Escalation:**
+   - Instead of dispatching nested Celery tasks or dynamic sub-chords from inside `aggregate_findings` (which would require either blocking `.get()` or complex chord recursion), Tier 2 escalation re-analysis runs synchronously/inline inside `aggregate_findings` using `analyze_llm()` with model `gemini-2.5-pro`. This eliminates subtask `.get()` calls and keeps the task DAG strictly acyclic and deterministic.
+3. **Single Source of Truth for Persistence:**
+   - `persist_results` is the single place where database persistence occurs. `aggregate_and_post()` remains opt-in and does not persist by default.
+4. **Posting Error Resilience:**
+   - If `post_review_to_github` fails (e.g., GitHub API outage, 403, or rate limit), the error is caught, `github_review_id` is recorded as `None`, and the payload is forwarded to `persist_results` so that analysis findings and telemetry are never lost (§10.2).
