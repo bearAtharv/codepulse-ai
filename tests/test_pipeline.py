@@ -22,6 +22,7 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
+from codepulse.aggregation.dedup import deduplicate_and_sort
 from codepulse.aggregation.models import Finding, normalize_category
 from codepulse.analysis.heuristics.base import ASTFinding
 from codepulse.config import get_settings
@@ -474,3 +475,186 @@ class TestPipelinePostgreSQLIntegration:
         # No findings persisted
         findings = db_session.query(DBFinding).filter(DBFinding.analysis_run_id == run.id).all()
         assert len(findings) == 0
+
+
+class TestVulnerabilityFamilyDeduplication:
+    """Verifies that cross-source merging pairs matching vulnerability families without dropping distinct issues."""
+
+    def test_eval_vs_sqli_same_line_stays_separate(self) -> None:
+        """eval and SQL injection on the same line and category must NOT merge."""
+        ast_eval = Finding(
+            file_path="src/app.py",
+            line_start=1,
+            line_end=1,
+            severity="high",
+            category="A03",
+            title="Use of eval() is a code-injection risk",
+            explanation="eval() executes arbitrary code.",
+            remediation="Use ast.literal_eval()",
+            confidence="high",
+            source="ast",
+            rule_id="PY-EVAL",
+        )
+        llm_sqli = Finding(
+            file_path="src/app.py",
+            line_start=1,
+            line_end=1,
+            severity="critical",
+            category="A03",
+            title="SQL injection via string interpolation",
+            explanation="Building SQL queries with string concatenation allows arbitrary SQL commands.",
+            remediation="Use parameterised queries.",
+            confidence="high",
+            source="llm",
+        )
+
+        res = deduplicate_and_sort([ast_eval, llm_sqli])
+        assert res.total_raw == 2
+        assert res.merged_count == 0
+        assert len(res.findings) == 2
+
+        # Both findings survive independently
+        titles = {f.title for f in res.findings}
+        assert "Use of eval() is a code-injection risk" in titles
+        assert "SQL injection via string interpolation" in titles
+
+        # Critical severity is preserved
+        severities = {f.severity for f in res.findings}
+        assert "critical" in severities
+        assert "high" in severities
+
+    def test_same_issue_merges_once(self) -> None:
+        """The same vulnerability family from AST and LLM merges into a single finding."""
+        ast_eval = Finding(
+            file_path="src/app.py",
+            line_start=1,
+            line_end=1,
+            severity="high",
+            category="A03",
+            title="Use of eval() is a code-injection risk",
+            explanation="eval() executes arbitrary code.",
+            remediation="Use ast.literal_eval()",
+            confidence="high",
+            source="ast",
+            rule_id="PY-EVAL",
+        )
+        llm_eval = Finding(
+            file_path="src/app.py",
+            line_start=1,
+            line_end=1,
+            severity="high",
+            category="A03",
+            title="Code injection via eval/exec",
+            explanation="eval() or exec() executes arbitrary code.",
+            remediation="Use safe evaluation.",
+            confidence="high",
+            source="llm",
+        )
+
+        res = deduplicate_and_sort([ast_eval, llm_eval])
+        assert res.total_raw == 2
+        assert res.merged_count == 1
+        assert len(res.findings) == 1
+
+        merged = res.findings[0]
+        assert merged.source == "merged"
+        assert "Also detected by llm" in merged.explanation
+
+    def test_merged_severity_never_downgrades(self) -> None:
+        """When an AST finding is high and LLM finding is critical, merged finding is critical."""
+        ast_sqli = Finding(
+            file_path="src/app.py",
+            line_start=10,
+            line_end=10,
+            severity="high",
+            category="A03",
+            title="SQL Injection",
+            explanation="AST detected string interpolation.",
+            remediation="Parametrize",
+            confidence="medium",
+            source="ast",
+            rule_id="PY-SQLI",
+        )
+        llm_sqli = Finding(
+            file_path="src/app.py",
+            line_start=10,
+            line_end=10,
+            severity="critical",
+            category="A03",
+            title="SQL Injection Exploit",
+            explanation="LLM verified critical SQL injection.",
+            remediation="Parametrize",
+            confidence="high",
+            source="llm",
+        )
+
+        res = deduplicate_and_sort([ast_sqli, llm_sqli])
+        assert len(res.findings) == 1
+        merged = res.findings[0]
+        assert merged.severity == "critical"  # Higher of high and critical
+        assert merged.confidence == "high"    # Higher of medium and high
+        assert merged.source == "merged"
+
+    def test_end_to_end_scenario_critical_survives_and_no_duplicate_eval(self) -> None:
+        """Matches the scenario from the end-to-end run on src/app.py line 1:
+        AST eval (high) + LLM SQLi (critical) + LLM eval (high).
+        Must result in:
+        - Exactly 1 eval finding (merged)
+        - Critical SQLi finding survived (not folded/downgraded into eval)
+        - Total 2 findings on line 1, no duplicate eval comments
+        """
+        ast_eval = Finding(
+            file_path="src/app.py",
+            line_start=1,
+            line_end=1,
+            severity="high",
+            category="A03",
+            title="Use of eval() is a code-injection risk",
+            explanation="eval() executes arbitrary code.",
+            remediation="Use ast.literal_eval()",
+            confidence="high",
+            source="ast",
+            rule_id="PY-EVAL",
+        )
+        llm_sqli = Finding(
+            file_path="src/app.py",
+            line_start=1,
+            line_end=1,
+            severity="critical",
+            category="A03",
+            title="SQL injection via string interpolation",
+            explanation="Building SQL queries with string concatenation allows arbitrary SQL commands.",
+            remediation="Use parameterised queries.",
+            confidence="high",
+            source="llm",
+        )
+        llm_eval = Finding(
+            file_path="src/app.py",
+            line_start=1,
+            line_end=1,
+            severity="high",
+            category="A03",
+            title="Code injection via eval/exec",
+            explanation="eval() or exec() executes arbitrary code.",
+            remediation="Use safe evaluation.",
+            confidence="high",
+            source="llm",
+        )
+
+        res = deduplicate_and_sort([ast_eval, llm_sqli, llm_eval])
+        assert res.total_raw == 3
+        assert res.merged_count == 1
+        assert len(res.findings) == 2
+
+        # 1. Critical finding survives!
+        critical_findings = [f for f in res.findings if f.severity == "critical"]
+        assert len(critical_findings) == 1
+        assert critical_findings[0].title == "SQL injection via string interpolation"
+        assert critical_findings[0].source == "llm"
+
+        # 2. Exactly one eval finding (merged)
+        eval_findings = [f for f in res.findings if "eval" in f.title.lower()]
+        assert len(eval_findings) == 1
+        assert eval_findings[0].source == "merged"
+        assert eval_findings[0].severity == "high"
+

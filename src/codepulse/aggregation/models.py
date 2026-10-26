@@ -83,6 +83,7 @@ class Finding:
     remediation: str
     confidence: str
     source: str  # "ast" | "llm" | "merged"
+    rule_id: str | None = None
     raw_category: str | None = None
     suggested_fix: str | None = None
     # Line mapping fields (computed against unified diff)
@@ -107,6 +108,7 @@ class Finding:
             remediation=ast_f.remediation,
             confidence=ast_f.confidence.lower(),
             source="ast",
+            rule_id=getattr(ast_f, "rule_id", None),
             raw_category=canonical_cat.raw_category,
             suggested_fix=None,
         )
@@ -125,6 +127,7 @@ class Finding:
             remediation=llm_f.remediation,
             confidence=llm_f.confidence.value.lower() if hasattr(llm_f.confidence, "value") else str(llm_f.confidence).lower(),
             source="llm",
+            rule_id=getattr(llm_f, "rule_id", None),
             raw_category=getattr(llm_f, "raw_category", None),
             suggested_fix=getattr(llm_f, "suggested_fix", None),
         )
@@ -142,6 +145,7 @@ class Finding:
             "remediation": self.remediation,
             "confidence": self.confidence,
             "source": self.source,
+            "rule_id": self.rule_id,
             "raw_category": self.raw_category,
             "suggested_fix": self.suggested_fix,
             "diff_line": self.diff_line,
@@ -164,6 +168,7 @@ class Finding:
             remediation=data["remediation"],
             confidence=data["confidence"],
             source=data["source"],
+            rule_id=data.get("rule_id"),
             raw_category=data.get("raw_category"),
             suggested_fix=data.get("suggested_fix"),
             diff_line=data.get("diff_line"),

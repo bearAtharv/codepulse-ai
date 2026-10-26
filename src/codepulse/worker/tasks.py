@@ -319,12 +319,22 @@ def aggregate_findings(
     unmapped_findings = [f for f in mapped_findings if not f.is_in_diff or f.diff_line is None]
 
     # 4. Compose review summary body
+    webhook_received_at = context.get("webhook_received_at")
+    if webhook_received_at:
+        try:
+            start_dt = datetime.fromisoformat(webhook_received_at)
+            duration_ms = max(1, int((datetime.now(timezone.utc) - start_dt).total_seconds() * 1000))
+        except Exception:
+            duration_ms = 0
+    else:
+        duration_ms = 0
+
     repo_ctx = normalize_repo_context(context)
     repo_ctx.files_analyzed = files_analyzed
     review_body = compose_review_summary(
         dedup_result=dedup_result,
         files_analyzed=files_analyzed,
-        analysis_duration_ms=0,
+        analysis_duration_ms=duration_ms,
         model_version=repo_ctx.model_version,
         unmapped_findings=unmapped_findings,
     )
@@ -351,6 +361,9 @@ def aggregate_findings(
     if context.get("head_sha"):
         review_payload["commit_id"] = context["head_sha"]
 
+    ast_chunks_completed = len([r for r in results if r.get("type") == "ast"])
+    completed_chunks = min(ast_chunks_completed, chunks_total) if chunks_total > 0 else len(results)
+
     return {
         "context": context,
         "findings": [f.to_dict() for f in mapped_findings],
@@ -358,7 +371,8 @@ def aggregate_findings(
         "diff_text": diff_text,
         "files_analyzed": files_analyzed,
         "chunks_total": chunks_total,
-        "chunks_completed": len(results),
+        "chunks_completed": completed_chunks,
+        "analysis_duration_ms": duration_ms,
         "llm_usages": llm_usages,
     }
 
@@ -418,15 +432,17 @@ def persist_results(data: dict[str, Any]) -> dict[str, Any]:
     )
 
     # Compute total analysis duration from webhook receipt
-    webhook_received_at = ctx.get("webhook_received_at")
-    if webhook_received_at:
-        try:
-            start_dt = datetime.fromisoformat(webhook_received_at)
-            duration_ms = int((datetime.now(timezone.utc) - start_dt).total_seconds() * 1000)
-        except Exception:
+    duration_ms = data.get("analysis_duration_ms")
+    if duration_ms is None or duration_ms == 0:
+        webhook_received_at = ctx.get("webhook_received_at")
+        if webhook_received_at:
+            try:
+                start_dt = datetime.fromisoformat(webhook_received_at)
+                duration_ms = max(1, int((datetime.now(timezone.utc) - start_dt).total_seconds() * 1000))
+            except Exception:
+                duration_ms = 0
+        else:
             duration_ms = 0
-    else:
-        duration_ms = 0
 
     factory = get_session_factory()
     with factory() as db:

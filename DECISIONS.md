@@ -235,21 +235,29 @@ an atomic PR review to the GitHub Pull Request Review API (§3.5, §3.6).
 
 ---
 
-## DEC-011: Cross-source finding deduplication on (file_path, line_start, category)
+## DEC-011: Cross-source finding deduplication on (file_path, line_start, category, vulnerability family)
 
 **Context:** Section 3.6.4 (Batching and Deduplication) states:
 > *"Before posting, findings are deduplicated on `(file_path, line_start, category, title)`. If AST and LLM both flag the same line with the same category, the finding with higher confidence is kept, and the other's explanation is appended as 'Also detected by {source}'."*
 
 There is an inherent conflict between these two sentences:
 1. The literal deduplication key is specified as a 4-field tuple: `(file_path, line_start, category, title)`.
-2. However, AST heuristics and LLM prompts will almost never generate the exact same `title` string for an issue (e.g., AST produces `"SQL Injection via string concatenation"` while LLM produces `"Potential SQL injection vulnerability detected"`).
+2. However, AST heuristics and LLM prompts will almost never generate the exact same `title` string for an issue (e.g., AST produces `"Use of eval() is a code-injection risk"` while LLM produces `"Code injection via eval/exec"`).
+3. Conversely, relaxing matching solely to `(file_path, line_start, category)` causes unrelated vulnerabilities on the same line sharing an OWASP category (e.g. `eval()` and SQL injection both under `A03`) to improperly collide and merge, downgrading critical issues and leaving duplicate comments for surviving findings.
 
-If the 4-field key including `title` were strictly enforced across different sources, cross-engine collision resolution would never trigger, resulting in duplicate comments posted to GitHub for the same line and category.
-
-**Decision:** Recorded as a judgment call. Retained the 4-field key `(file_path, line_start, category, title)` for identical findings from the same source, but relaxed the title requirement when matching findings across different sources: findings from different sources (AST vs. LLM) that share `(file_path, line_start, category)` are merged per §3.6.4. The merged finding retains the winning (higher confidence) title, attributes the losing source (`"Also detected by {source}."`), and sets `source = "merged"`.
+**Decision (Judgment Call):**
+1. **Deduplication Rules:**
+   - **Same-Source Deduplication:** Retain the strict 4-field key `(file_path, line_start, category, title)` for findings originating from the same engine (e.g., two AST findings or two LLM findings).
+   - **Cross-Source Merging:** An AST finding and an LLM finding are paired and merged if and only if they share `file_path`, `line_start`, `category`, and a common **vulnerability family**.
+   - **Vulnerability Family Classifier:** A coarse-grained family classifier (`get_vulnerability_family()`) derives the issue type (`sql`, `eval`, `command`, `xss`, `secret`, `crypto`, `deserialization`, `memory_leak`, `empty_except`, `sensitive_log`, `ssrf`, `jwt`, `debug`, `bind`) by inspecting the AST `rule_id` and the finding's `title` and `explanation` keywords.
+   - **Single Counterpart Invariant:** A finding may merge with at most one counterpart. Once merged, its source is marked `"merged"`, preventing further merges.
+   - **Severity & Confidence Union:** A merged finding's severity is strictly the **higher** of the two severities (never downgraded), and its confidence is strictly the **higher** of the two confidences.
+   - **Attribution:** The higher-confidence finding (or higher-severity if tied) provides the primary title and explanation text, with `"Also detected by {loser_source}."` appended.
 
 **Known Limitations:**
-- LLM line numbers can occasionally be off by a line or two compared to exact AST token spans (e.g., pointing to a function header or variable assignment rather than the nested call expression). Exact line matching (`line_start`) means that if the LLM reports line 42 and AST reports line 43, they will not merge. A fuzzy line window was considered but deferred to avoid incorrectly merging distinct adjacent vulnerabilities.
+- **Keyword & Rule Heuristic:** If an LLM writes an explanation using novel terminology that does not match known family keywords, it falls back to matching on canonical category code.
+- **Multiple Vulnerabilities of Same Family on One Line:** If two distinct vulnerabilities of the same family exist on the exact same line (e.g., two distinct `eval` calls on line 1), cross-source merging will pair the first AST and LLM finding, leaving the second separate.
+- **Line Offset Variations:** Exact line matching (`line_start`) is preserved. If the LLM reports line 42 and AST reports line 43 for the same statement, they will not merge. A fuzzy window was considered but rejected to avoid false merges across consecutive lines.
 
 ---
 
