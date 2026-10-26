@@ -484,7 +484,7 @@ class TestPhase7aBranchGAndPersistenceRecovery:
         }
 
         # 1. Simulate PostgreSQL persistence failure injection
-        with patch.dict(os.environ, {"MOCK_PERSIST_FAILURE": "true"}):
+        with patch.dict(os.environ, {"MOCK_GITHUB": "true", "MOCK_PERSIST_FAILURE": "true"}):
             fallback_res = persist_results(data)
 
         assert fallback_res["status"] == "fallback_redis"
@@ -548,3 +548,28 @@ class TestPhase7aWorkerLogPrivacy:
         # Metadata IS present
         assert run_id in all_logs
         assert "owner/repo" in all_logs
+
+    def test_failure_injection_ignored_when_mock_disabled(self) -> None:
+        """Failure injection env vars must be strictly ignored when MOCK_GITHUB/MOCK_LLM is false."""
+        data = {
+            "context": {
+                "installation_id": 1,
+                "repository_full_name": "owner/repo",
+                "pull_request_number": 1,
+                "head_sha": "a" * 40,
+                "analysis_run_id": str(uuid.uuid4()),
+            },
+            "review_payload": {"event": "COMMENT", "body": "test", "comments": []},
+            "findings": [],
+        }
+
+        # With MOCK_GITHUB=false, MOCK_POSTING_FAILURE=true must NOT raise or fail injected retry
+        with patch.dict(os.environ, {"MOCK_GITHUB": "false", "MOCK_POSTING_FAILURE": "true"}):
+            with patch("codepulse.worker.tasks.get_github_poster") as mock_get_poster:
+                mock_poster = MagicMock()
+                mock_poster.post_review.return_value = {"id": 12345}
+                mock_get_poster.return_value = mock_poster
+
+                res = post_review_to_github(data)
+                assert res["github_review_id"] == 12345
+

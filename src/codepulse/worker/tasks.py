@@ -885,7 +885,10 @@ def persist_results(self: Any, data: dict[str, Any]) -> dict[str, Any]:
     retries = getattr(self.request, "retries", 0)
 
     # Failure injection (§7.6)
-    if settings.mock_persist_failure or os.environ.get("MOCK_PERSIST_FAILURE", "").lower() in ("true", "1", "yes"):
+    if (settings.mock_github or settings.mock_llm) and (
+        settings.mock_persist_failure
+        or os.environ.get("MOCK_PERSIST_FAILURE", "").lower() in ("true", "1", "yes")
+    ):
         exc = RuntimeError("Simulated PostgreSQL connection failure (MOCK_PERSIST_FAILURE)")
         if not is_direct and retries < 3:
             delay = get_retry_delay(PERSIST_RESULTS_BACKOFF, retries)

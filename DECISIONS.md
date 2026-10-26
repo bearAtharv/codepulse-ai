@@ -319,3 +319,6 @@ In distributed Celery architectures, calling `.get()` or blocking on child subta
 7. **Worker Log Privacy:**
    - Celery trace logging format `celery.app.trace.LOG_SUCCESS` is customized to omit `%(return_value)s`.
    - Application logger records strictly metadata (run IDs, repo names, PR numbers, file names, finding counts). Zero customer source code or diff lines are logged.
+8. **Branch H (Worker Crash Mid-Task):**
+   - Configured with `task_acks_late=True`, `worker_prefetch_multiplier=1`, and `visibility_timeout=300`.
+   - Task handlers (such as `persist_results`) are idempotent. Note: configured and idempotent; crash redelivery not demonstrated.

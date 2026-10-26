@@ -282,6 +282,19 @@ The `analysis_runs` table has a unique constraint on `(repository_id, pull_reque
   - **Docker Compose Worker**: Dedicated worker container consuming `cp-high,cp-analysis,cp-aggregate` queues.
   - **14 unit & integration tests** (`tests/test_pipeline.py`) covering task execution, eager-mode full chain, posting failure recovery, and skipped empty diffs.
 
+### Phase 7a — Pass-by-Reference Pipeline, Retries, Dead-Letter Handling & Admin Retry
+
+- **Pass-by-Reference Pipeline** (`src/codepulse/worker/tasks.py`, `src/codepulse/persistence/database.py`): Diffs, patches, and review payloads stored in Redis with 24h TTL; tasks pass lightweight string references.
+- **Retry Policies & Timeouts** (`src/codepulse/worker/celery_app.py`, `src/codepulse/worker/tasks.py`): Task-specific exponential backoffs and Celery soft/hard execution limits matching §3.5.3 and §3.5.5.
+- **Dead-Letter Handling & Recovery**:
+  - **Branch C**: Diff fetch retries with backoff; exhausted failures logged to `dead_letter_log` and mark run `failed`.
+  - **Branch F**: Review posting retries up to 5 times; on exhaustion, durable review payload is stored in `dead_letter_log.task_args` while findings remain committed to Postgres.
+  - **Branch G**: Persistence retries with backoff; on DB outage, findings fall back to Redis queue `codepulse:pending_persistence` for replay via `recover_pending_persistence()`.
+  - **Branch H**: Celery configured with `task_acks_late=True`, `worker_prefetch_multiplier=1`, and `visibility_timeout=300`. Configured and idempotent; crash redelivery not demonstrated.
+- **Admin Retry Endpoint** (`src/codepulse/ingestion/admin.py`): `POST /admin/retry-posting/{analysis_run_id}` with constant-time bearer token authentication against `ADMIN_API_KEY`.
+- **Worker Log Privacy**: Zero customer code or diff hunks logged; Celery trace logging format sanitized.
+- **11 unit & integration tests** (`tests/test_phase7a.py`) covering configuration, reference passing, dead-letter persistence, admin retry, and log privacy.
+
 ---
 
 ## Getting Started

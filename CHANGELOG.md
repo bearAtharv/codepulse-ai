@@ -12,7 +12,7 @@ All notable changes to CodePulse AI are documented here.
 - **Task retry policies, exponential backoffs, and timeout limits** (`src/codepulse/worker/celery_app.py`, `src/codepulse/worker/tasks.py`):
   - Configured task-specific retries and backoff schedules: `fetch_pr_diff` (3 retries: 5s, 15s, 45s), `analyze_ast` (1 retry: 2s), `analyze_llm` (3 retries: 2s, 6s, 18s), `post_review_to_github` (5 retries: 3s, 9s, 27s, 81s, 243s), `persist_results` (3 retries: 1s, 3s, 9s) per §3.5.3.
   - Configured Celery soft/hard task time limits in `task_annotations` per §3.5.5.
-  - Configured at-least-once delivery guarantees: `task_acks_late=True`, `worker_prefetch_multiplier=1`, `visibility_timeout=300` (§6.2, §10.2 Branch H).
+  - Configured at-least-once delivery guarantees: `task_acks_late=True`, `worker_prefetch_multiplier=1`, `visibility_timeout=300` (§6.2, §10.2 Branch H; configured and idempotent; crash redelivery not demonstrated).
 - **Dead-letter handling & failure branch execution** (`src/codepulse/worker/tasks.py`):
   - Branch C: `fetch_pr_diff` failure retries and logs exhausted failures to `dead_letter_log` and sets `analysis_runs.status='failed'` with `error_message='GitHub API unavailable'`.
   - Branch F: `post_review_to_github` failure retries up to 5 times. On exhaustion, stores the review payload durably in PostgreSQL `dead_letter_log` (`task_args["review_payload"]`), leaves `review_posted_at=NULL`, and completes `persist_results` with `status='completed'`.
