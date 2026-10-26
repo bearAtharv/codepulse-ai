@@ -55,6 +55,8 @@ services:
       CELERY_BROKER_URL: "redis://redis:6379/0"
       CELERY_RESULT_BACKEND: "redis://redis:6379/0"
       GITHUB_WEBHOOK_SECRET: "dev_webhook_secret_not_for_production"
+      ADMIN_API_KEY: "dev_admin_key_not_for_production"
+      ENVIRONMENT: "development"
       MOCK_GITHUB: "true"
       MOCK_LLM: "true"
     depends_on:
@@ -72,6 +74,8 @@ services:
       CELERY_BROKER_URL: "redis://redis:6379/0"
       CELERY_RESULT_BACKEND: "redis://redis:6379/0"
       GITHUB_WEBHOOK_SECRET: "dev_webhook_secret_not_for_production"
+      ADMIN_API_KEY: "dev_admin_key_not_for_production"
+      ENVIRONMENT: "development"
       MOCK_GITHUB: "true"
       MOCK_LLM: "true"
     depends_on:

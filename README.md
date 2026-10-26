@@ -16,7 +16,8 @@ CodePulse AI is a GitHub App that automatically reviews pull requests using a co
 | **4** | LLM analysis engine (Gemini) | ✅ Done |
 | **5** | Aggregation, dedup, GitHub review posting | ✅ Done |
 | **6** | Celery orchestration wiring | ✅ Done |
-| **7** | Failure handling (retry, circuit-breaker, dead-letter) | 🔲 Planned |
+| **7a** | Ref-passing pipeline, retries, dead-letter, admin retry | ✅ Done |
+| **7b** | Rate limiting, circuit breakers, caching, error branches | 🔲 Planned |
 | **8** | Kubernetes/Helm + observability | 🔲 Planned |
 
 ---

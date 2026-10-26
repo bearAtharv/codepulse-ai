@@ -283,3 +283,39 @@ In distributed Celery architectures, calling `.get()` or blocking on child subta
    - `persist_results` is the single place where database persistence occurs. `aggregate_and_post()` remains opt-in and does not persist by default.
 4. **Posting Error Resilience:**
    - If `post_review_to_github` fails (e.g., GitHub API outage, 403, or rate limit), the error is caught, `github_review_id` is recorded as `None`, and the payload is forwarded to `persist_results` so that analysis findings and telemetry are never lost (§10.2).
+
+---
+
+## DEC-013: Phase 7a Pass-by-Reference Pipeline, Retries, Dead-Letter Handling, and Admin Retry
+
+**Context:** Section 3.5.3, 3.5.4, 3.5.5, 3.7.2, and Section 10.2 specify production resilience guarantees:
+1. Avoid passing megabyte-sized diffs and multi-finding review structures across Celery task message payloads in Redis.
+2. Implement task-specific retry counts, exponential backoffs, and soft/hard timeouts matching §3.5.3 and §3.5.5.
+3. Handle failure branches C (diff fetch), F (posting failure), G (postgres persistence failure), and H (worker crash mid-task).
+4. Provide an authenticated administrative retry endpoint `POST /admin/retry-posting/{analysis_run_id}`.
+
+**Decisions (Judgment Calls & Specifications):**
+1. **Pass-by-Reference Pipeline (Redis Storage):**
+   - Unified diffs and file patches are stored in Redis under keys `diff:{analysis_run_id}` and `pr_files:{analysis_run_id}` with a 24-hour TTL (86,400s per §3.7.2).
+   - PR review payloads (containing summary body and formatted inline comments) are stored in Redis under `review_payload:{analysis_run_id}` with a 24-hour TTL.
+   - Celery task signatures pass lightweight reference strings (`diff_ref`, `review_ref`, `files_ref`), keeping message broker payload sizes minimal and reducing memory usage.
+2. **Durable Dead-Letter Storage for Admin Retry (Branch F):**
+   - For Branch F (posting to GitHub fails and retries exhaust), relying solely on Redis for review payload retention would mean reviews could not be retried after the 24-hour Redis TTL expires.
+   - Therefore, the full review payload is serialized into the PostgreSQL `dead_letter_log.task_args` JSONB column alongside task metadata.
+   - Analysis findings remain safely committed to PostgreSQL with `status='completed'` and `review_posted_at=NULL`.
+   - The admin endpoint loads the review payload directly from `dead_letter_log`, posts to GitHub, updates `analysis_runs.review_posted_at` and `github_review_id`, and marks `dead_letter_log.resolved=TRUE`.
+3. **Branch G Persistence Fallback & Recovery:**
+   - When PostgreSQL connection fails during `persist_results`, the task retries up to 3 times (1s, 3s, 9s backoff per §3.5.3).
+   - If PostgreSQL is permanently down, findings, LLM telemetry, and run statistics are stored in Redis under `dead_letter:persist:{analysis_run_id}` and pushed to Redis queue `codepulse:pending_persistence` (7-day TTL).
+   - Recovery function `recover_pending_persistence()` drains this queue and inserts all pending findings and metrics once PostgreSQL recovers.
+4. **Terminal Status Invariant:**
+   - Any task that exhausts retries or aborts permanently transitions `analysis_runs.status='failed'` with `error_message` recorded. An analysis run is never left in `"running"` or `"pending"`.
+5. **Admin Retry Security:**
+   - Authenticated via bearer token header matched against `ADMIN_API_KEY` using constant-time comparison (`hmac.compare_digest`).
+   - If `ADMIN_API_KEY` is not set, the endpoint is disabled and returns HTTP 503.
+   - If `ENVIRONMENT=production`, well-known development keys (`dev_admin_key_not_for_production`, `admin`, etc.) are rejected with HTTP 500.
+6. **Failure Injection Isolation:**
+   - Failure injection is strictly controlled by worker environment variables (`MOCK_POSTING_FAILURE`, `MOCK_DIFF_FETCH_FAILURE`, `MOCK_PERSIST_FAILURE`) and is honored only when `MOCK_GITHUB=true` or `MOCK_LLM=true`. Webhook headers and request payloads cannot trigger failure injection.
+7. **Worker Log Privacy:**
+   - Celery trace logging format `celery.app.trace.LOG_SUCCESS` is customized to omit `%(return_value)s`.
+   - Application logger records strictly metadata (run IDs, repo names, PR numbers, file names, finding counts). Zero customer source code or diff lines are logged.

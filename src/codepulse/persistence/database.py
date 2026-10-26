@@ -6,7 +6,9 @@ a new connection pool on every request.
 
 from __future__ import annotations
 
-from typing import Generator
+import json
+import logging
+from typing import Any, Generator
 import redis as redis_lib
 
 from sqlalchemy import Engine, create_engine
@@ -54,6 +56,30 @@ def get_redis_client() -> redis_lib.Redis:
             settings.redis_url, decode_responses=True
         )
     return _redis_client
+
+
+def save_payload_ref(key: str, data: Any, ttl: int = 86400) -> str:
+    """Store serialized JSON data in Redis with a TTL and return the key."""
+    try:
+        client = get_redis_client()
+        serialized = json.dumps(data)
+        client.set(key, serialized, ex=ttl)
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Failed to save payload to Redis key %s: %s", key, exc)
+    return key
+
+
+def get_payload_ref(key: str) -> Any | None:
+    """Retrieve and deserialize JSON data from Redis by key."""
+    try:
+        client = get_redis_client()
+        raw = client.get(key)
+        if raw is None:
+            return None
+        return json.loads(raw)
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Failed to read payload from Redis key %s: %s", key, exc)
+        return None
 
 
 def get_db_session() -> Generator[Session, None, None]:

@@ -29,9 +29,16 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-3.7-flash"
     gemini_escalation_model: str = "gemini-2.5-pro"
 
+    # ── Environment & Admin ─────────────────────────────────────────────────────
+    environment: str = "development"
+    admin_api_key: str | None = None
+
     # ── Mock modes (for local/test without real external APIs) ──────────────────
     mock_github: bool = True
     mock_llm: bool = True
+    mock_diff_fetch_failure: bool = False
+    mock_posting_failure: bool = False
+    mock_persist_failure: bool = False
 
     # ── Celery ──────────────────────────────────────────────────────────────────
     celery_broker_url: str = "redis://localhost:6379/0"
@@ -42,6 +49,8 @@ class Settings(BaseSettings):
     github_token_ttl: int = 3300  # 55 minutes
     file_content_cache_ttl: int = 86400  # 24 hours
     llm_cache_ttl: int = 86400  # 24 hours
+    diff_cache_ttl: int = 86400  # 24 hours
+    review_payload_cache_ttl: int = 86400  # 24 hours
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 

@@ -6,9 +6,13 @@ for the CodePulse worker pipeline (Section 3.5).
 
 from __future__ import annotations
 
+import celery.app.trace
 from celery import Celery
 
 from codepulse.config import get_settings
+
+# Prevent Celery trace from logging return_value payloads (source code, diffs, findings)
+celery.app.trace.LOG_SUCCESS = "Task %(name)s[%(id)s] succeeded in %(runtime)ss"
 
 settings = get_settings()
 
@@ -28,6 +32,16 @@ celery_app.conf.update(
     task_acks_late=True,
     worker_prefetch_multiplier=1,
     task_default_queue="cp-high",
+    broker_transport_options={"visibility_timeout": 300},
+    task_annotations={
+        "tasks.fetch_pr_diff": {"soft_time_limit": 30, "time_limit": 45},
+        "tasks.preprocess_and_chunk": {"soft_time_limit": 10, "time_limit": 15},
+        "tasks.analyze_ast": {"soft_time_limit": 5, "time_limit": 8},
+        "tasks.analyze_llm": {"soft_time_limit": 15, "time_limit": 20},
+        "tasks.aggregate_findings": {"soft_time_limit": 5, "time_limit": 8},
+        "tasks.post_review_to_github": {"soft_time_limit": 30, "time_limit": 45},
+        "tasks.persist_results": {"soft_time_limit": 10, "time_limit": 15},
+    },
     task_routes={
         "tasks.orchestrate_pr_analysis": {"queue": "cp-high"},
         "tasks.fetch_pr_diff": {"queue": "cp-high"},

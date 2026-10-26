@@ -2,6 +2,32 @@
 
 All notable changes to CodePulse AI are documented here.
 
+## [Unreleased] — Phase 7a: Reference-Passing Pipeline, Retries, Dead-Letter Handling, and Admin Retry
+
+### Added
+- **Pass-by-reference pipeline architecture** (`src/codepulse/worker/tasks.py`, `src/codepulse/persistence/database.py`):
+  - Diffs and PR file patches stored in Redis under keys `diff:{analysis_run_id}` and `pr_files:{analysis_run_id}` with 24-hour TTL (§3.7.2).
+  - Review payloads stored in Redis under `review_payload:{analysis_run_id}` with 24-hour TTL.
+  - Tasks pass lightweight reference strings (`diff_ref`, `review_ref`, `files_ref`) across the Celery broker, eliminating large payload transmission and worker memory spikes.
+- **Task retry policies, exponential backoffs, and timeout limits** (`src/codepulse/worker/celery_app.py`, `src/codepulse/worker/tasks.py`):
+  - Configured task-specific retries and backoff schedules: `fetch_pr_diff` (3 retries: 5s, 15s, 45s), `analyze_ast` (1 retry: 2s), `analyze_llm` (3 retries: 2s, 6s, 18s), `post_review_to_github` (5 retries: 3s, 9s, 27s, 81s, 243s), `persist_results` (3 retries: 1s, 3s, 9s) per §3.5.3.
+  - Configured Celery soft/hard task time limits in `task_annotations` per §3.5.5.
+  - Configured at-least-once delivery guarantees: `task_acks_late=True`, `worker_prefetch_multiplier=1`, `visibility_timeout=300` (§6.2, §10.2 Branch H).
+- **Dead-letter handling & failure branch execution** (`src/codepulse/worker/tasks.py`):
+  - Branch C: `fetch_pr_diff` failure retries and logs exhausted failures to `dead_letter_log` and sets `analysis_runs.status='failed'` with `error_message='GitHub API unavailable'`.
+  - Branch F: `post_review_to_github` failure retries up to 5 times. On exhaustion, stores the review payload durably in PostgreSQL `dead_letter_log` (`task_args["review_payload"]`), leaves `review_posted_at=NULL`, and completes `persist_results` with `status='completed'`.
+  - Branch G: `persist_results` failure falls back to Redis key `dead_letter:persist:{analysis_run_id}` and list `codepulse:pending_persistence`. Added `recover_pending_persistence()` to safely drain and replay saved findings once PostgreSQL recovers.
+- **Admin retry endpoint** (`src/codepulse/ingestion/admin.py`):
+  - `POST /admin/retry-posting/{analysis_run_id}` endpoint.
+  - Constant-time HMAC authentication using `ADMIN_API_KEY`.
+  - Automatically disabled (HTTP 503) when `ADMIN_API_KEY` is not set; rejects well-known development keys when `ENVIRONMENT=production`.
+  - Loads durable review payload from `dead_letter_log`, posts to GitHub, updates `analysis_runs.review_posted_at` and `github_review_id`, and marks `dead_letter_log.resolved=TRUE`.
+- **Worker log privacy**:
+  - Sanitized Celery success trace format (`celery.app.trace.LOG_SUCCESS`) to omit task return values.
+  - Application logging constrained strictly to metadata (run IDs, repo names, PR numbers, file names, finding counts). Zero customer code or diff lines are logged.
+- **Tests** (`tests/test_phase7a.py`):
+  - 10 unit and integration tests covering Celery config, pass-by-reference round trips, Branch C exhaustion, Branch F dead-letter persistence, Admin retry auth and recovery, Branch G persistence fallback/recovery, Branch H idempotency, and log privacy.
+
 ## [Unreleased] — Phase 6: Celery Task Orchestration, Pipeline & Worker Service (Phases 6a & 6b)
 
 ### Added

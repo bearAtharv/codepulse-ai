@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from codepulse.persistence.database import get_engine, get_redis_client
+from codepulse.ingestion.admin import router as admin_router
 from codepulse.ingestion.webhook import router as webhook_router
 
 app = FastAPI(
@@ -16,6 +17,7 @@ app = FastAPI(
 )
 
 app.include_router(webhook_router)
+app.include_router(admin_router)
 
 
 @app.get("/health/live")
