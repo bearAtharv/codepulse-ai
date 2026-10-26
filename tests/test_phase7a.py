@@ -40,6 +40,7 @@ from codepulse.worker.tasks import (
     POST_REVIEW_BACKOFF,
     aggregate_findings,
     fetch_pr_diff,
+    get_retry_delay,
     persist_results,
     post_review_to_github,
     recover_pending_persistence,
@@ -572,4 +573,24 @@ class TestPhase7aWorkerLogPrivacy:
 
                 res = post_review_to_github(data)
                 assert res["github_review_id"] == 12345
+
+    def test_mock_quick_retries_gated_by_mock_mode(self) -> None:
+        """MOCK_QUICK_RETRIES must only scale delays to 1s when MOCK_GITHUB or MOCK_LLM is true."""
+        backoffs = [3, 9, 27]
+
+        # 1. When mock is disabled, MOCK_QUICK_RETRIES=true must be ignored
+        with patch.dict(os.environ, {"MOCK_GITHUB": "false", "MOCK_LLM": "false", "MOCK_QUICK_RETRIES": "true"}):
+            delay = get_retry_delay(backoffs, retry_count=1)
+            assert delay == 9
+
+        # 2. When MOCK_GITHUB is true, MOCK_QUICK_RETRIES=true takes effect
+        with patch.dict(os.environ, {"MOCK_GITHUB": "true", "MOCK_LLM": "false", "MOCK_QUICK_RETRIES": "true"}):
+            delay = get_retry_delay(backoffs, retry_count=1)
+            assert delay == 1
+
+        # 3. When MOCK_LLM is true, MOCK_QUICK_RETRIES=true takes effect
+        with patch.dict(os.environ, {"MOCK_GITHUB": "false", "MOCK_LLM": "true", "MOCK_QUICK_RETRIES": "true"}):
+            delay = get_retry_delay(backoffs, retry_count=1)
+            assert delay == 1
+
 

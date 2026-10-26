@@ -73,9 +73,21 @@ POST_REVIEW_BACKOFF = [3, 9, 27, 81, 243]
 PERSIST_RESULTS_BACKOFF = [1, 3, 9]
 
 
+def is_mock_mode_enabled() -> bool:
+    """Return True if mock mode is active for GitHub or LLM."""
+    env_github = os.environ.get("MOCK_GITHUB", "").lower()
+    env_llm = os.environ.get("MOCK_LLM", "").lower()
+    if env_github in ("false", "0", "no") and env_llm in ("false", "0", "no"):
+        return False
+    if env_github in ("true", "1", "yes") or env_llm in ("true", "1", "yes"):
+        return True
+    settings = get_settings()
+    return bool(settings.mock_github or settings.mock_llm)
+
+
 def get_retry_delay(backoffs: list[int], retry_count: int) -> int:
     """Return retry delay for the current attempt, with optional test scaling."""
-    if os.environ.get("MOCK_QUICK_RETRIES", "").lower() in ("true", "1"):
+    if is_mock_mode_enabled() and os.environ.get("MOCK_QUICK_RETRIES", "").lower() in ("true", "1", "yes"):
         return 1
     return backoffs[min(retry_count, len(backoffs) - 1)]
 
