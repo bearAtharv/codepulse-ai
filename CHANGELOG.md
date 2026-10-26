@@ -2,6 +2,40 @@
 
 All notable changes to CodePulse AI are documented here.
 
+## [Unreleased] — Phase 7b: Rate Limiting, Caching, Circuit Breaker, and Graceful Degradation
+
+### Added
+- **Gemini Token-Bucket Rate Limiter** (`src/codepulse/analysis/rate_limiter.py`):
+  - Distributed Redis-backed atomic sliding token bucket via Lua script (`TOKEN_BUCKET_LUA`).
+  - Enforces 324 RPM (360 RPM quota minus 10% safety margin per §3.4.6, §11) with a burst capacity of 10 tokens.
+  - Non-blocking design: calculates precise wait time until the next token grant and reschedules `analyze_llm_task` with countdown without blocking Celery worker processes.
+- **Distributed Circuit Breaker** (`src/codepulse/analysis/circuit_breaker.py`):
+  - Distributed 3-state circuit breaker (`CLOSED`, `OPEN`, `HALF_OPEN`) via atomic Redis Lua scripts per §6.3.
+  - Trips to `OPEN` on 5 consecutive failures within a 60-second window.
+  - Recovers after 30 seconds into `HALF_OPEN`, allowing a single test probe request. Success closes the circuit; failure reopens it.
+  - When open, `analyze_llm_task` catches the state immediately and returns degraded mode (`llm_degraded=True`), allowing the pipeline chord to complete.
+- **LLM Response Caching** (`src/codepulse/worker/tasks.py`):
+  - Cache key `llm_cache:{sha256(version:model_id:prompt_text)}` with 24-hour TTL per §3.4.5 and §3.7.2.
+  - Avoids redundant Gemini calls for identical prompt inputs. Cache hits record `cache_hit=True`, 0 input/output tokens, and 0 latency in `llm_usage_log`.
+- **Graceful Degradation & Review Summary Disclaimer** (`src/codepulse/aggregation/summary.py`):
+  - Review summary includes verbatim degraded-mode alert per §6.4 when LLM analysis is unavailable:
+    `> ⚠️ **Degraded Mode:** LLM analysis unavailable; AST-only results shown. Re-analysis will be triggered automatically when the service recovers.`
+  - `AnalysisRun.reanalysis_needed` set to `True` in PostgreSQL when LLM analysis degrades.
+- **Celery Beat Service & Periodic Schedules** (`docker-compose.yml`, `src/codepulse/worker/celery_app.py`, `src/codepulse/worker/tasks.py`):
+  - Added dedicated single-instance `beat` service in `docker-compose.yml`.
+  - Periodic task `tasks.scan_reanalysis_needed` running every 5 minutes (300s per §6.4) to re-analyze degraded runs using Option A delivery.
+  - Periodic task `tasks.drain_pending_persistence_task` running every 60s to drain and persist queued findings from Redis when PostgreSQL was temporarily unavailable (Branch G).
+- **Option A Re-analysis Engine** (`src/codepulse/worker/tasks.py`):
+  - Distributed Redis locking (`lock:reanalyze:{run_id}`) prevents duplicate runs across worker instances.
+  - Verifies PR head SHA is still current (superseded commits are marked `reanalysis_needed=False` without re-running).
+  - Enforces a 3-attempt cap per run in Redis (`reanalyze:attempts:{run_id}`).
+  - Uses cross-source vulnerability family matching (DEC-011) to merge matching LLM findings into existing AST findings (`source='merged'`, higher severity/confidence).
+  - Posts a follow-up review comment containing strictly the newly discovered LLM findings. Idempotent on repeated executions.
+- **GitHub Rate Limit Handling (`cp-retry`)** (`src/codepulse/worker/tasks.py`):
+  - Reschedules tasks to the `cp-retry` queue with `eta` at reset timestamp when GitHub remaining quota drops below 100 (§10.2 Branch E).
+- **Tests** (`tests/test_phase7b.py`):
+  - 11 unit and integration tests covering token bucket rate limiting, response caching, circuit breaker state transitions, degraded mode review summaries, re-analysis merging and supersession, and attempt caps.
+
 ## [Unreleased] — Phase 7a: Reference-Passing Pipeline, Retries, Dead-Letter Handling, and Admin Retry
 
 ### Added

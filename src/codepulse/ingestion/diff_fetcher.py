@@ -119,6 +119,16 @@ class BaseDiffFetcher(ABC):
         """Fetch full file content at a specific commit SHA."""
         ...
 
+    def fetch_pr_head_sha(
+        self,
+        owner: str,
+        repo: str,
+        pull_number: int,
+        installation_id: int | None = None,
+    ) -> str | None:
+        """Fetch the current head SHA of a pull request."""
+        return None
+
 
 # ── Mock Diff Fetcher (MOCK_GITHUB=true) ───────────────────────────────
 
@@ -174,11 +184,23 @@ class MockDiffFetcher(BaseDiffFetcher):
 
     def __init__(self, custom_files: list[PRFile] | None = None) -> None:
         self._custom_files = custom_files
+        self._mock_head_sha = "1" * 40
         self._content_map: dict[str, str] = {
             "src/app.py": _MOCK_APP_PY_CONTENT,
             "src/index.js": _MOCK_INDEX_JS_CONTENT,
             "src/clean.py": _MOCK_CLEAN_PY_CONTENT,
         }
+
+    def fetch_pr_head_sha(
+        self,
+        owner: str,
+        repo: str,
+        pull_number: int,
+        installation_id: int | None = None,
+    ) -> str | None:
+        if os.environ.get("MOCK_CURRENT_HEAD_SHA"):
+            return os.environ.get("MOCK_CURRENT_HEAD_SHA")
+        return getattr(self, "_mock_head_sha", "1" * 40)
 
     def fetch_pr_files(
         self,
@@ -431,6 +453,21 @@ class GitHubDiffFetcher(BaseDiffFetcher):
                 logger.warning("Redis error caching %s: %s", cache_key, exc)
 
         return decoded
+
+    def fetch_pr_head_sha(
+        self,
+        owner: str,
+        repo: str,
+        pull_number: int,
+        installation_id: int | None = None,
+    ) -> str | None:
+        headers = self._build_headers(installation_id)
+        url = f"{self.base_url}/repos/{owner}/{repo}/pulls/{pull_number}"
+        with httpx.Client(timeout=self.timeout) as client:
+            resp = client.get(url, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+            return data.get("head", {}).get("sha")
 
 
 # ── Factory ────────────────────────────────────────────────────────────

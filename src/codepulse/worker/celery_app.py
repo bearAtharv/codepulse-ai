@@ -46,10 +46,24 @@ celery_app.conf.update(
         "tasks.orchestrate_pr_analysis": {"queue": "cp-high"},
         "tasks.fetch_pr_diff": {"queue": "cp-high"},
         "tasks.post_review_to_github": {"queue": "cp-high"},
+        "tasks.scan_reanalysis_needed": {"queue": "cp-high"},
+        "tasks.drain_pending_persistence_task": {"queue": "cp-high"},
         "tasks.analyze_ast": {"queue": "cp-analysis"},
         "tasks.analyze_llm": {"queue": "cp-analysis"},
         "tasks.preprocess_and_chunk": {"queue": "cp-aggregate"},
         "tasks.aggregate_findings": {"queue": "cp-aggregate"},
         "tasks.persist_results": {"queue": "cp-aggregate"},
+    },
+    beat_schedule={
+        "scan-reanalysis-needed": {
+            "task": "tasks.scan_reanalysis_needed",
+            "schedule": 300.0,  # every 5 minutes (§6.4)
+            "options": {"queue": "cp-high"},
+        },
+        "drain-pending-persistence": {
+            "task": "tasks.drain_pending_persistence_task",
+            "schedule": 60.0,  # every 60 seconds (judgment call)
+            "options": {"queue": "cp-high"},
+        },
     },
 )

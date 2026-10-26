@@ -322,3 +322,38 @@ In distributed Celery architectures, calling `.get()` or blocking on child subta
 8. **Branch H (Worker Crash Mid-Task):**
    - Configured with `task_acks_late=True`, `worker_prefetch_multiplier=1`, and `visibility_timeout=300`.
    - Task handlers (such as `persist_results`) are idempotent. Note: configured and idempotent; crash redelivery not demonstrated.
+
+---
+
+## DEC-014: Phase 7b Rate Limiting, Caching, Circuit Breaker, and Graceful Degradation / Re-analysis
+
+**Context:** Section 3.4.5, 3.4.6, 3.7.2, 6.3, 6.4, 10.2 Branch D & E, and Section 11 define resiliency mechanisms for Gemini API rate limits, external service failures, and degraded operation.
+However, Section 6.4 specifies that *"a `reanalysis_needed` flag is set on the `analysis_runs` row... A Celery Beat task runs periodically (e.g. every 5 minutes)... When Gemini recovers, it picks up flagged runs, re-runs LLM analysis, and updates the review comments"*, but leaves several delivery, retry, and matching behaviors unspecified.
+
+**Decisions (Judgment Calls & Specifications):**
+1. **Re-analysis Delivery (Option A):**
+   - When a degraded run is picked up by the Celery Beat task (`scan_reanalysis_needed`), it executes `analyze_llm` over the stored PR diff chunks.
+   - Newly discovered LLM findings are compared against existing AST findings using the cross-source vulnerability-family matching rules established in DEC-011.
+   - If an LLM finding matches an existing AST finding on `(file_path, line_start, category, family)`, it is merged into the existing finding in PostgreSQL (`source = 'merged'`, retaining higher severity and confidence).
+   - If an LLM finding does not match any existing AST finding, it represents a genuinely new issue.
+   - Delivery mechanism: CodePulse AI posts a single follow-up review comment to GitHub containing only the newly discovered findings and an updated summary. If no new findings were found (all matched AST or none generated), nothing is posted to GitHub to avoid noisy empty review updates.
+   - `AnalysisRun.reanalysis_needed` is cleared to `false` and `total_findings` is updated in PostgreSQL. The operation is completely idempotent: a second execution finds nothing new, posts nothing, and changes nothing.
+2. **Re-analysis Attempt Cap (3 attempts):**
+   - To prevent poisoned diffs or persistent API edge-cases from entering infinite re-analysis loops every 5 minutes, re-analysis attempts are tracked and capped at 3 per run in Redis (`reanalyze:attempts:{run_id}` with 24h TTL).
+   - If 3 attempts fail or produce no changes, `reanalysis_needed` is set to `false` and an explanatory error message is recorded.
+3. **Commit Supersession Check:**
+   - Before re-analyzing, the task verifies the PR's current head SHA against `AnalysisRun.head_sha`. If new commits were pushed to the PR in the interim, re-analysis is skipped and marked `reanalysis_needed = false` because the subsequent commit's analysis run supersedes it.
+4. **Degraded Mode Disclaimer:**
+   - When LLM analysis fails or the Gemini circuit breaker is open, the initial PR review is composed in degraded mode (AST heuristics only). The review body includes the following markdown disclaimer verbatim from §6.4:
+     `> ⚠️ **Degraded Mode:** LLM analysis unavailable; AST-only results shown. Re-analysis will be triggered automatically when the service recovers.`
+5. **Rate Limiting (Token Bucket via Redis Lua):**
+   - Configured for 324 RPM (360 RPM provisioned minus 10% safety margin per §3.4.6 and §11) with a burst capacity of 10 tokens.
+   - Implemented as an atomic Redis Lua script. When tokens are unavailable, the script calculates and returns the exact seconds until a token is granted. The task reschedules itself via `raise self.retry(countdown=wait_seconds)` without blocking Celery worker threads.
+6. **Circuit Breaker (§6.3, §10.2 Branch D):**
+   - 3 states: `CLOSED`, `OPEN`, `HALF_OPEN`.
+   - Trip condition: 5 consecutive failures within a 60-second rolling window transitions state to `OPEN`.
+   - Recovery timeout: 30 seconds in `OPEN` before allowing a single probe request in `HALF_OPEN`. If probe succeeds, resets to `CLOSED`; if probe fails, returns to `OPEN`.
+   - When `OPEN`, `analyze_llm_task` catches the state immediately and falls back to AST-only degraded mode with `reanalysis_needed = true`, allowing the Celery chord body to proceed without failing the PR analysis pipeline.
+7. **GitHub Rate Limit Queue (`cp-retry`):**
+   - When GitHub rate limit headers report `< 100` requests remaining (§10.2 Branch E), `fetch_pr_diff` and `post_review_to_github` tasks are rescheduled to the `cp-retry` queue with `eta` matching GitHub's `x-ratelimit-reset` timestamp.
+

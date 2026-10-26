@@ -22,6 +22,7 @@ def compose_review_summary(
     analysis_duration_ms: int = 0,
     model_version: str = "gemini-3.7-flash",
     unmapped_findings: Sequence[Finding] | None = None,
+    degraded_mode: bool = False,
 ) -> str:
     """Compose top-level markdown summary for GitHub review body.
 
@@ -73,6 +74,14 @@ def compose_review_summary(
             f"> ⚠️ **Notice:** {dedup_result.truncated_count} lower-severity findings were "
             f"omitted to respect GitHub's 256-comment review limit. Critical and high-severity "
             f"findings were prioritized.",
+            "",
+        ])
+
+    # Degraded mode alert (§6.4)
+    if degraded_mode:
+        parts.extend([
+            "> ⚠️ **Degraded Mode:** LLM analysis unavailable; AST-only results shown. "
+            "Re-analysis will be triggered automatically when the service recovers.",
             "",
         ])
 

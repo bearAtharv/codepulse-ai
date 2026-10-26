@@ -21,6 +21,7 @@ Defines the distributed DAG:
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import logging
 import os
@@ -34,14 +35,22 @@ from celery import chain, chord
 from celery.exceptions import Ignore, Retry
 
 from codepulse.aggregation.comments import format_finding_comment
-from codepulse.aggregation.dedup import deduplicate_and_sort
+from codepulse.aggregation.dedup import (
+    deduplicate_and_sort,
+    get_vulnerability_family,
+    higher_confidence,
+    higher_severity,
+)
 from codepulse.aggregation.engine import (
     check_tier2_escalation,
     normalize_repo_context,
     run_tier2_escalation,
 )
 from codepulse.aggregation.github_poster import get_github_poster
-from codepulse.aggregation.line_mapping import map_findings_to_diff_positions
+from codepulse.aggregation.line_mapping import (
+    map_findings_to_diff_positions,
+    parse_unified_diff,
+)
 from codepulse.aggregation.models import Finding
 from codepulse.aggregation.persistence import (
     persist_analysis_results,
@@ -50,11 +59,14 @@ from codepulse.aggregation.persistence import (
 )
 from codepulse.aggregation.summary import compose_review_summary
 from codepulse.analysis.ast_engine import analyze_chunk
-from codepulse.analysis.llm_engine import analyze_llm
+from codepulse.analysis.circuit_breaker import CircuitBreaker
+from codepulse.analysis.llm_engine import DiffChunk, analyze_llm, build_prompt
+from codepulse.analysis.llm_schemas import LLMFindingItem
+from codepulse.analysis.rate_limiter import TokenBucketRateLimiter
 from codepulse.config import get_settings
 from codepulse.ingestion.diff_fetcher import PRFile, get_diff_fetcher
 from codepulse.ingestion.preprocessor import AnalysisChunk, preprocess_pr_files
-from codepulse.models.tables import DeadLetterLog
+from codepulse.models.tables import AnalysisRun, DeadLetterLog, Finding as DBFinding
 from codepulse.persistence.database import (
     get_payload_ref,
     get_redis_client,
@@ -64,6 +76,15 @@ from codepulse.persistence.database import (
 from codepulse.worker.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
+
+PROMPT_SCHEMA_VERSION = "v1"
+
+
+def get_llm_cache_key(prompt_text: str, model_id: str, schema_version: str = PROMPT_SCHEMA_VERSION) -> str:
+    """Generate SHA-256 cache key covering prompt content, model id, and schema version (§3.4.5, §3.7.2)."""
+    raw = f"{schema_version}:{model_id}:{prompt_text}"
+    content_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return f"llm_cache:{content_hash}"
 
 # §3.5.3 Retry delays (seconds)
 FETCH_PR_DIFF_BACKOFF = [5, 15, 45]
@@ -174,6 +195,9 @@ def recover_pending_persistence(redis_client: Any, db: Any) -> int:
         if not payload:
             continue
         findings = [Finding.from_dict(f) for f in payload.get("findings", [])]
+        for f in findings:
+            if not isinstance(f.confidence, str):
+                f.confidence = str(f.confidence)
         posted_at = (
             datetime.fromisoformat(payload["review_posted_at"])
             if payload.get("review_posted_at")
@@ -201,6 +225,7 @@ def recover_pending_persistence(redis_client: Any, db: Any) -> int:
                 latency_ms=int(u.get("latency_ms", 0)),
                 cache_hit=False,
             )
+        db.commit()
         redis_client.delete(f"dead_letter:persist:{run_id}")
         recovered += 1
     return recovered
@@ -285,6 +310,17 @@ def fetch_pr_diff(self: Any, payload: dict[str, Any]) -> dict[str, Any]:
     settings = get_settings()
     is_direct = getattr(self.request, "called_directly", False)
     retries = getattr(self.request, "retries", 0)
+
+    # GitHub Rate Limit Check (§10.2 Branch E)
+    if is_mock_mode_enabled() and os.environ.get("MOCK_GITHUB_RATE_LIMIT", "").lower() in ("true", "1", "yes"):
+        reset_ts = float(os.environ.get("MOCK_GITHUB_RESET_TS", time.time() + 10))
+        eta = datetime.fromtimestamp(reset_ts, timezone.utc)
+        logger.warning(
+            "GitHub rate limit threshold reached (<100 remaining). Rescheduling %s to cp-retry at %s",
+            self.name,
+            eta.isoformat(),
+        )
+        raise self.retry(queue="cp-retry", eta=eta)
 
     # Failure injection (§7.6)
     if settings.mock_github and (
@@ -535,13 +571,94 @@ def analyze_llm_task(
     diff_chunks = [AnalysisChunk.from_dict(d).to_diff_chunk() for d in chunks_data]
     is_direct = getattr(self.request, "called_directly", False)
     retries = getattr(self.request, "retries", 0)
+    settings = get_settings()
+    model_id = settings.gemini_model
 
+    # 1. LLM Response Caching (§3.4.5, §3.7.2)
+    _, prompt_text = build_prompt(repo_name, language, diff_chunks)
+    cache_key = get_llm_cache_key(prompt_text, model_id)
+    redis_client = get_redis_client()
+
+    try:
+        cached_raw = redis_client.get(cache_key)
+        if cached_raw:
+            cached_data = json.loads(cached_raw)
+            cached_findings = cached_data.get("findings", [])
+            cached_model = cached_data.get("model_version", model_id)
+            logger.info(
+                "analyze_llm cache HIT: run %s (%s, %d chunks, %d findings)",
+                analysis_run_id,
+                language,
+                len(diff_chunks),
+                len(cached_findings),
+            )
+            return {
+                "type": "llm",
+                "findings": cached_findings,
+                "usage": {
+                    "model_version": cached_model,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "latency_ms": 0,
+                    "cache_hit": True,
+                },
+            }
+    except Exception as cache_err:
+        logger.warning("Error checking LLM cache for %s: %s", cache_key, cache_err)
+
+    # 2. Token-Bucket Rate Limiter (§3.4.6, §11)
+    rate_limiter = TokenBucketRateLimiter(redis_client)
+    if is_mock_mode_enabled() and os.environ.get("MOCK_RATE_LIMIT", "").lower() in ("true", "1", "yes"):
+        allowed, wait_seconds = False, float(os.environ.get("MOCK_RATE_LIMIT_WAIT", "2.0"))
+    else:
+        allowed, wait_seconds = rate_limiter.acquire(cost=1)
+
+    if not allowed:
+        retry_delay = max(1, int(wait_seconds))
+        logger.warning(
+            "Gemini rate limit threshold reached for task %s. Scheduling retry in %ds (no worker blocking)",
+            analysis_run_id,
+            retry_delay,
+        )
+        raise self.retry(countdown=retry_delay)
+
+    # 3. Circuit Breaker (§6.3, §10.2 Branch D)
+    breaker = CircuitBreaker(redis_client, name="gemini")
+    if is_mock_mode_enabled() and os.environ.get("MOCK_LLM_FAILURE", "").lower() in ("true", "1", "yes"):
+        breaker.record_failure()
+        logger.warning("Simulated LLM failure injected. Breaker state: %s", breaker.get_state())
+        allowed_by_breaker = False
+    else:
+        allowed_by_breaker, breaker_state = breaker.can_execute()
+
+    if not allowed_by_breaker:
+        logger.warning(
+            "Gemini circuit breaker is OPEN for run %s. Proceeding with AST-only in degraded mode (§6.4).",
+            analysis_run_id,
+        )
+        return {
+            "type": "llm",
+            "findings": [],
+            "usage": {
+                "model_version": model_id,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "latency_ms": 0,
+                "cache_hit": False,
+            },
+            "llm_degraded": True,
+            "error": "Circuit breaker OPEN",
+        }
+
+    # 4. Invoke LLM Analysis
     start_time = time.perf_counter()
     try:
         llm_result = analyze_llm(diff_chunks, repo_name, language)
+        breaker.record_success()
     except (Retry, Ignore):
         raise
     except Exception as exc:
+        breaker.record_failure()
         if not is_direct and retries < 3:
             delay = get_retry_delay(ANALYZE_LLM_BACKOFF, retries)
             logger.warning(
@@ -553,6 +670,12 @@ def analyze_llm_task(
             )
             raise self.retry(exc=exc, countdown=delay)
         else:
+            logger.error(
+                "analyze_llm retries exhausted for run %s (%s): %s. Proceeding in degraded mode.",
+                analysis_run_id,
+                language,
+                exc,
+            )
             record_dead_letter(
                 task_name="tasks.analyze_llm",
                 task_id=getattr(self.request, "id", None) or str(uuid.uuid4()),
@@ -560,11 +683,24 @@ def analyze_llm_task(
                 exc=exc,
                 retry_count=retries,
             )
-            raise
+            # Catch failure and return degraded result so chord body still runs
+            return {
+                "type": "llm",
+                "findings": [],
+                "usage": {
+                    "model_version": model_id,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "latency_ms": 0,
+                    "cache_hit": False,
+                },
+                "llm_degraded": True,
+                "error": str(exc),
+            }
 
     latency_ms = int((time.perf_counter() - start_time) * 1000)
     unified_findings = [Finding.from_llm_finding(f).to_dict() for f in llm_result.findings]
-    model_version = getattr(llm_result.metadata, "model_version", None) or "gemini-3.7-flash"
+    model_version = getattr(llm_result.metadata, "model_version", None) or model_id
     input_tokens = getattr(llm_result.metadata.token_usage, "input", 0)
     output_tokens = getattr(llm_result.metadata.token_usage, "output", 0)
     usage = {
@@ -575,8 +711,18 @@ def analyze_llm_task(
         "cache_hit": False,
     }
 
+    # Cache successful response in Redis (24h TTL per §3.7.2)
+    try:
+        redis_client.set(
+            cache_key,
+            json.dumps({"findings": unified_findings, "model_version": model_version}),
+            ex=settings.llm_cache_ttl,
+        )
+    except Exception as cache_err:
+        logger.warning("Error caching LLM result for %s: %s", cache_key, cache_err)
+
     logger.info(
-        "analyze_llm completed: run %s (%s, %d chunks, %d findings, %dms)",
+        "analyze_llm completed: run %s (%s, %d chunks, %d findings, %dms, cache_miss)",
         analysis_run_id,
         language,
         len(diff_chunks),
@@ -625,8 +771,11 @@ def aggregate_findings(
 
     all_findings: list[Finding] = []
     llm_usages: list[dict[str, Any]] = []
+    llm_degraded = False
 
     for r in results:
+        if r.get("llm_degraded"):
+            llm_degraded = True
         if r.get("type") == "ast":
             for fd in r.get("findings", []):
                 all_findings.append(Finding.from_dict(fd))
@@ -635,6 +784,9 @@ def aggregate_findings(
                 all_findings.append(Finding.from_dict(fd))
             if "usage" in r:
                 llm_usages.append(r["usage"])
+
+    if llm_degraded:
+        context["llm_degraded"] = True
 
     # 1. Deduplicate & sort (§3.6.4, DEC-010, DEC-011)
     dedup_result = deduplicate_and_sort(all_findings, max_findings=256)
@@ -683,6 +835,7 @@ def aggregate_findings(
         analysis_duration_ms=duration_ms,
         model_version=repo_ctx.model_version,
         unmapped_findings=unmapped_findings,
+        degraded_mode=llm_degraded,
     )
 
     # 5. Format inline comment payloads
@@ -764,6 +917,17 @@ def post_review_to_github(self: Any, data: dict[str, Any]) -> dict[str, Any]:
     settings = get_settings()
     is_direct = getattr(self.request, "called_directly", False)
     retries = getattr(self.request, "retries", 0)
+
+    # GitHub Rate Limit Check (§10.2 Branch E)
+    if is_mock_mode_enabled() and os.environ.get("MOCK_GITHUB_RATE_LIMIT", "").lower() in ("true", "1", "yes"):
+        reset_ts = float(os.environ.get("MOCK_GITHUB_RESET_TS", time.time() + 10))
+        eta = datetime.fromtimestamp(reset_ts, timezone.utc)
+        logger.warning(
+            "GitHub rate limit threshold reached (<100 remaining). Rescheduling %s to cp-retry at %s",
+            self.name,
+            eta.isoformat(),
+        )
+        raise self.retry(queue="cp-retry", eta=eta)
 
     # Failure injection (§7.6)
     if settings.mock_github and (
@@ -896,6 +1060,17 @@ def persist_results(self: Any, data: dict[str, Any]) -> dict[str, Any]:
     is_direct = getattr(self.request, "called_directly", False)
     retries = getattr(self.request, "retries", 0)
 
+    # GitHub Rate Limit Check (§10.2 Branch E)
+    if is_mock_mode_enabled() and os.environ.get("MOCK_GITHUB_RATE_LIMIT", "").lower() in ("true", "1", "yes"):
+        reset_ts = float(os.environ.get("MOCK_GITHUB_RESET_TS", time.time() + 10))
+        eta = datetime.fromtimestamp(reset_ts, timezone.utc)
+        logger.warning(
+            "GitHub rate limit threshold reached (<100 remaining). Rescheduling %s to cp-retry at %s",
+            self.name,
+            eta.isoformat(),
+        )
+        raise self.retry(queue="cp-retry", eta=eta)
+
     # Failure injection (§7.6)
     if (settings.mock_github or settings.mock_llm) and (
         settings.mock_persist_failure
@@ -949,7 +1124,7 @@ def persist_results(self: Any, data: dict[str, Any]) -> dict[str, Any]:
                     input_tokens=int(u["input_tokens"]),
                     output_tokens=int(u["output_tokens"]),
                     latency_ms=int(u.get("latency_ms", 0)),
-                    cache_hit=False,
+                    cache_hit=bool(u.get("cache_hit", False)),
                 )
 
             # 2. Persist findings & update analysis_runs (idempotent, single transaction)
@@ -965,6 +1140,13 @@ def persist_results(self: Any, data: dict[str, Any]) -> dict[str, Any]:
                 review_posted_at=posted_at,
                 status="completed",
             )
+
+            # 3. Graceful degradation flag (§6.4, §10.2 Branch D)
+            if data.get("context", {}).get("llm_degraded"):
+                run_obj = db.get(AnalysisRun, uuid.UUID(run_id))
+                if run_obj:
+                    run_obj.reanalysis_needed = True
+                    db.commit()
     except (Retry, Ignore):
         raise
     except Exception as exc:
@@ -1017,3 +1199,289 @@ def persist_results(self: Any, data: dict[str, Any]) -> dict[str, Any]:
         "analysis_run_id": run_id,
         "github_review_id": data.get("github_review_id"),
     }
+
+
+# ── Celery Beat Periodic Tasks (§6.4, §10.2 Branch D & G) ─────────────
+
+
+@celery_app.task(
+    name="tasks.drain_pending_persistence_task",
+    queue="cp-high",
+    soft_time_limit=30,
+    time_limit=45,
+)
+def drain_pending_persistence_task() -> int:
+    """Periodic task on Celery Beat (every 60s) to drain Redis pending persistence queue (Branch G)."""
+    redis_client = get_redis_client()
+    factory = get_session_factory()
+    with factory() as db:
+        recovered = recover_pending_persistence(redis_client, db)
+        if recovered > 0:
+            logger.info("drain_pending_persistence_task recovered %d runs from Redis", recovered)
+        return recovered
+
+
+@celery_app.task(
+    name="tasks.scan_reanalysis_needed",
+    queue="cp-high",
+    soft_time_limit=120,
+    time_limit=180,
+)
+def scan_reanalysis_needed() -> int:
+    """Periodic task on Celery Beat (every 5 min per §6.4) to re-analyze degraded runs (Option A)."""
+    breaker = CircuitBreaker(name="gemini")
+    allowed, state = breaker.can_execute()
+    if not allowed and state == "OPEN":
+        logger.info("Gemini circuit breaker is OPEN. Skipping re-analysis scan (§6.4).")
+        return 0
+
+    redis_client = get_redis_client()
+    factory = get_session_factory()
+    reanalyzed_count = 0
+
+    with factory() as db:
+        runs = (
+            db.query(AnalysisRun)
+            .filter(
+                AnalysisRun.reanalysis_needed == True,  # noqa: E712
+                AnalysisRun.status == "completed",
+            )
+            .order_by(AnalysisRun.created_at.asc())
+            .limit(10)
+            .all()
+        )
+
+        for run in runs:
+            run_id = str(run.id)
+            lock_key = f"lock:reanalyze:{run_id}"
+            # Distributed lock: ensure only one worker processes this run
+            acquired = redis_client.set(lock_key, "1", nx=True, ex=300)
+            if not acquired:
+                continue
+
+            try:
+                # Cap attempts per run in Redis (cap = 3, judgment call logged in DEC-014)
+                attempt_key = f"reanalyze:attempts:{run_id}"
+                attempts = redis_client.incr(attempt_key)
+                redis_client.expire(attempt_key, 86400)
+                if attempts > 3:
+                    logger.warning(
+                        "Re-analysis attempt cap (3) reached for run %s. Clearing reanalysis_needed flag.",
+                        run_id,
+                    )
+                    run.reanalysis_needed = False
+                    run.error_message = "Re-analysis attempts exhausted (cap: 3)"
+                    db.commit()
+                    continue
+
+                repo = run.repository
+                owner, repo_name = repo.full_name.split("/", 1)
+                pr_number = run.pull_request_number
+
+                # Check PR head SHA is still the analyzed SHA
+                diff_fetcher = get_diff_fetcher()
+                try:
+                    current_head_sha = diff_fetcher.fetch_pr_head_sha(
+                        owner, repo_name, pr_number, installation_id=repo.installation_id
+                    ) or run.head_sha
+                except Exception:
+                    current_head_sha = run.head_sha
+
+                if current_head_sha != run.head_sha:
+                    logger.info(
+                        "PR %s#%d head SHA moved from %s to %s. Re-analysis superseded.",
+                        repo.full_name,
+                        pr_number,
+                        run.head_sha[:8],
+                        current_head_sha[:8],
+                    )
+                    run.reanalysis_needed = False
+                    db.commit()
+                    continue
+
+                # Fetch PR files & chunk for LLM analysis
+                files = diff_fetcher.fetch_pr_files(owner, repo_name, pr_number, installation_id=repo.installation_id)
+                filter_result = preprocess_pr_files(files)
+                llm_chunks = filter_result.chunks
+                if not llm_chunks:
+                    run.reanalysis_needed = False
+                    db.commit()
+                    continue
+
+                diff_chunks = [c.to_diff_chunk() for c in llm_chunks]
+                primary_lang = "python"
+                for c in llm_chunks:
+                    if c.file_path.endswith((".js", ".ts", ".jsx", ".tsx")):
+                        primary_lang = "javascript"
+                        break
+
+                # Execute LLM analysis only (not AST again)
+                llm_result = analyze_llm(diff_chunks, repo.full_name, primary_lang)
+                new_llm_findings = [Finding.from_llm_finding(f) for f in llm_result.findings]
+
+                # Map to diff positions
+                diff_text = get_payload_ref(f"diff:{run_id}")
+                if not diff_text:
+                    patches = [f.patch for f in files if f.patch]
+                    diff_text = "\n".join(patches)
+                mapped_llm_findings = map_findings_to_diff_positions(new_llm_findings, diff_text)
+
+                # Match against already persisted findings using vulnerability-family merge rule (DEC-011)
+                existing_findings = (
+                    db.query(DBFinding)
+                    .filter(DBFinding.analysis_run_id == run.id)
+                    .all()
+                )
+
+                matched_count = 0
+                unmatched_findings: list[Finding] = []
+
+                for nf in mapped_llm_findings:
+                    nf_family = get_vulnerability_family(nf)
+                    matched_db_finding: DBFinding | None = None
+                    for ef in existing_findings:
+                        ef_model = Finding(
+                            file_path=ef.file_path,
+                            line_start=ef.line_start,
+                            line_end=ef.line_end,
+                            severity=ef.severity,
+                            category=ef.category,
+                            title=ef.title,
+                            explanation=ef.explanation,
+                            remediation=ef.remediation,
+                            confidence=ef.confidence,
+                            source=ef.source,
+                        )
+                        if (
+                            ef.file_path == nf.file_path
+                            and ef.line_start == nf.line_start
+                            and ef.category == nf.category
+                            and get_vulnerability_family(ef_model) == nf_family
+                        ):
+                            matched_db_finding = ef
+                            break
+
+                    if matched_db_finding is not None:
+                        # Matched: update existing finding in place (keep higher severity/confidence)
+                        merged_sev = higher_severity(matched_db_finding.severity, nf.severity)
+                        merged_conf = higher_confidence(matched_db_finding.confidence, nf.confidence)
+                        matched_db_finding.severity = merged_sev.lower()
+                        matched_db_finding.confidence = merged_conf.lower()
+                        matched_db_finding.source = "merged"
+                        if "Also detected by" not in matched_db_finding.explanation and "Also confirmed by" not in matched_db_finding.explanation:
+                            matched_db_finding.explanation += " (Also confirmed by LLM analysis)"
+                        matched_count += 1
+                    else:
+                        unmatched_findings.append(nf)
+
+                # Post ONE follow-up review if unmatched findings exist
+                if unmatched_findings:
+                    inline_unmatched = [f for f in unmatched_findings if f.is_in_diff and f.diff_line is not None]
+                    comments_payload: list[dict[str, Any]] = []
+                    for uf in inline_unmatched:
+                        comment = {
+                            "path": uf.file_path,
+                            "line": uf.diff_line,
+                            "side": uf.diff_side,
+                            "body": format_finding_comment(uf),
+                        }
+                        if uf.diff_start_line is not None and uf.diff_start_line != uf.diff_line:
+                            comment["start_line"] = uf.diff_start_line
+                            comment["start_side"] = uf.diff_side
+                        comments_payload.append(comment)
+
+                    review_body = (
+                        f"### 🛡️ CodePulse AI — Follow-up LLM analysis\n\n"
+                        f"Follow-up semantic analysis has completed for commit `{run.head_sha[:8]}`.\n\n"
+                        f"- **Confirmed existing findings:** {matched_count}\n"
+                        f"- **New findings detected:** {len(unmatched_findings)}"
+                    )
+
+                    review_payload = {
+                        "event": "COMMENT",
+                        "body": review_body,
+                        "comments": comments_payload,
+                        "commit_id": run.head_sha,
+                    }
+
+                    poster = get_github_poster()
+                    try:
+                        resp = poster.post_review(owner, repo_name, pr_number, review_payload)
+                        logger.info(
+                            "Follow-up review posted for %s#%d (review_id=%s)",
+                            repo.full_name,
+                            pr_number,
+                            resp.get("id"),
+                        )
+                    except Exception as post_err:
+                        logger.error(
+                            "Failed to post follow-up review for %s#%d: %s",
+                            repo.full_name,
+                            pr_number,
+                            post_err,
+                        )
+                        record_dead_letter(
+                            task_name="tasks.scan_reanalysis_needed",
+                            task_id=str(uuid.uuid4()),
+                            task_args={
+                                "analysis_run_id": run_id,
+                                "review_payload": review_payload,
+                            },
+                            exc=post_err,
+                            retry_count=attempts,
+                        )
+
+                    # Insert unmatched findings into DB
+                    for uf in unmatched_findings:
+                        is_posted = bool(uf.is_in_diff and uf.diff_line is not None)
+                        db.add(
+                            DBFinding(
+                                id=uuid.uuid4(),
+                                analysis_run_id=run.id,
+                                file_path=uf.file_path[:500],
+                                line_start=uf.line_start,
+                                line_end=uf.line_end,
+                                severity=uf.severity.lower(),
+                                category=uf.category[:20],
+                                title=uf.title[:200],
+                                explanation=uf.explanation,
+                                remediation=uf.remediation,
+                                confidence=uf.confidence.lower(),
+                                source="llm",
+                                raw_llm_category=uf.raw_category[:50] if uf.raw_category else None,
+                                is_posted=is_posted,
+                            )
+                        )
+
+                # Record LLM usage row in DB
+                model_ver = getattr(llm_result.metadata, "model_version", None) or "gemini-3.7-flash"
+                in_tok = getattr(llm_result.metadata.token_usage, "input", 0)
+                out_tok = getattr(llm_result.metadata.token_usage, "output", 0)
+                record_llm_usage(
+                    db=db,
+                    analysis_run_id=run.id,
+                    model_version=model_ver,
+                    input_tokens=in_tok,
+                    output_tokens=out_tok,
+                    latency_ms=0,
+                    cache_hit=False,
+                )
+
+                # Update AnalysisRun counts & clear flag
+                all_db_findings = db.query(DBFinding).filter(DBFinding.analysis_run_id == run.id).all()
+                run.total_findings = len(all_db_findings)
+                run.critical_count = sum(1 for f in all_db_findings if f.severity.lower() == "critical")
+                run.high_count = sum(1 for f in all_db_findings if f.severity.lower() == "high")
+                run.medium_count = sum(1 for f in all_db_findings if f.severity.lower() == "medium")
+                run.low_count = sum(1 for f in all_db_findings if f.severity.lower() == "low")
+                run.reanalysis_needed = False
+
+                db.commit()
+                reanalyzed_count += 1
+                logger.info("Re-analysis completed successfully for run %s", run_id)
+
+            finally:
+                redis_client.delete(lock_key)
+
+    return reanalyzed_count
+

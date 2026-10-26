@@ -59,6 +59,11 @@ services:
       ENVIRONMENT: "development"
       MOCK_GITHUB: "true"
       MOCK_LLM: "true"
+      MOCK_LLM_FAILURE: "${MOCK_LLM_FAILURE:-false}"
+      MOCK_RATE_LIMIT: "${MOCK_RATE_LIMIT:-false}"
+      MOCK_RATE_LIMIT_WAIT: "${MOCK_RATE_LIMIT_WAIT:-2.0}"
+      MOCK_GITHUB_RATE_LIMIT: "${MOCK_GITHUB_RATE_LIMIT:-false}"
+      GEMINI_RPM_LIMIT: "${GEMINI_RPM_LIMIT:-324}"
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -67,7 +72,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: ["celery", "-A", "codepulse.worker.celery_app", "worker", "-l", "info", "-Q", "cp-high,cp-analysis,cp-aggregate", "-c", "4"]
+    command: ["celery", "-A", "codepulse.worker.celery_app", "worker", "-l", "info", "-Q", "cp-high,cp-analysis,cp-aggregate,cp-retry", "-c", "4"]
     environment:
       DATABASE_URL: "postgresql://codepulse:codepulse_dev@postgres:5432/codepulse"
       REDIS_URL: "redis://redis:6379/0"
@@ -78,10 +83,43 @@ services:
       ENVIRONMENT: "development"
       MOCK_GITHUB: "true"
       MOCK_LLM: "true"
+      MOCK_LLM_FAILURE: "${MOCK_LLM_FAILURE:-false}"
+      MOCK_RATE_LIMIT: "${MOCK_RATE_LIMIT:-false}"
+      MOCK_RATE_LIMIT_WAIT: "${MOCK_RATE_LIMIT_WAIT:-2.0}"
+      MOCK_GITHUB_RATE_LIMIT: "${MOCK_GITHUB_RATE_LIMIT:-false}"
+      GEMINI_RPM_LIMIT: "${GEMINI_RPM_LIMIT:-324}"
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["celery", "-A", "codepulse.worker.celery_app", "beat", "-l", "info"]
+    environment:
+      DATABASE_URL: "postgresql://codepulse:codepulse_dev@postgres:5432/codepulse"
+      REDIS_URL: "redis://redis:6379/0"
+      CELERY_BROKER_URL: "redis://redis:6379/0"
+      CELERY_RESULT_BACKEND: "redis://redis:6379/0"
+      GITHUB_WEBHOOK_SECRET: "dev_webhook_secret_not_for_production"
+      ADMIN_API_KEY: "dev_admin_key_not_for_production"
+      ENVIRONMENT: "development"
+      MOCK_GITHUB: "true"
+      MOCK_LLM: "true"
+      MOCK_LLM_FAILURE: "${MOCK_LLM_FAILURE:-false}"
+      MOCK_RATE_LIMIT: "${MOCK_RATE_LIMIT:-false}"
+      MOCK_RATE_LIMIT_WAIT: "${MOCK_RATE_LIMIT_WAIT:-2.0}"
+      MOCK_GITHUB_RATE_LIMIT: "${MOCK_GITHUB_RATE_LIMIT:-false}"
+      GEMINI_RPM_LIMIT: "${GEMINI_RPM_LIMIT:-324}"
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully

@@ -17,7 +17,7 @@ CodePulse AI is a GitHub App that automatically reviews pull requests using a co
 | **5** | Aggregation, dedup, GitHub review posting | ✅ Done |
 | **6** | Celery orchestration wiring | ✅ Done |
 | **7a** | Ref-passing pipeline, retries, dead-letter, admin retry | ✅ Done |
-| **7b** | Rate limiting, circuit breakers, caching, error branches | 🔲 Planned |
+| **7b** | Rate limiting, circuit breakers, caching, error branches | ✅ Done |
 | **8** | Kubernetes/Helm + observability | 🔲 Planned |
 
 ---
@@ -294,6 +294,18 @@ The `analysis_runs` table has a unique constraint on `(repository_id, pull_reque
 - **Admin Retry Endpoint** (`src/codepulse/ingestion/admin.py`): `POST /admin/retry-posting/{analysis_run_id}` with constant-time bearer token authentication against `ADMIN_API_KEY`.
 - **Worker Log Privacy**: Zero customer code or diff hunks logged; Celery trace logging format sanitized.
 - **11 unit & integration tests** (`tests/test_phase7a.py`) covering configuration, reference passing, dead-letter persistence, admin retry, and log privacy.
+
+### Phase 7b — Rate Limiting, Caching, Circuit Breaker & Graceful Degradation
+
+- **Gemini Rate Limiter** (`src/codepulse/analysis/rate_limiter.py`): Distributed sliding token bucket via atomic Redis Lua script enforcing 324 RPM (360 RPM - 10% safety margin per §3.4.6, §11) with burst 10 tokens. Reschedules tasks with exact countdown without worker blocking.
+- **Circuit Breaker** (`src/codepulse/analysis/circuit_breaker.py`): 3-state breaker (`CLOSED`, `OPEN`, `HALF_OPEN`) via atomic Redis Lua scripts per §6.3. Trips to `OPEN` on 5 failures within 60s; recovers to `HALF_OPEN` probe after 30s.
+- **LLM Response Caching** (`src/codepulse/worker/tasks.py`): Response cache keyed by `llm_cache:{sha256(version:model_id:prompt_text)}` with 24-hour TTL (§3.4.5, §3.7.2). Hits recorded as `cache_hit=True` with zero token consumption.
+- **Graceful Degradation & Re-analysis** (`src/codepulse/aggregation/summary.py`, `src/codepulse/worker/tasks.py`):
+  - When LLM analysis is unavailable, reviews post in degraded mode (AST-only) with disclaimer alert (§6.4) and `reanalysis_needed=True`.
+  - Celery Beat scheduled periodic task `tasks.scan_reanalysis_needed` runs every 5 minutes (300s) to re-analyze degraded runs using Option A delivery: merges matching LLM findings into AST findings and posts follow-up review with new findings only.
+  - Celery Beat scheduled periodic task `tasks.drain_pending_persistence_task` runs every 60s to recover and persist fallback data from Redis.
+- **GitHub Rate Limit Handling (`cp-retry`)** (`src/codepulse/worker/tasks.py`): Tasks encountering GitHub remaining quota < 100 are rescheduled to `cp-retry` with `eta` at reset timestamp.
+- **11 unit & integration tests** (`tests/test_phase7b.py`) covering rate limiter retry scheduling, response cache invalidation/telemetry, circuit breaker transitions, degraded review formatting, re-analysis merging/supersession, and attempt caps. Total test suite: **318 tests**.
 
 ---
 
