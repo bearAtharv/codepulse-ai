@@ -662,6 +662,7 @@ def analyze_llm_task(
                     "cache_hit": False,
                 },
                 "degraded": True,
+                "llm_degraded": True,
                 "error": "Rate limit wait deadline exceeded",
             }
 
@@ -838,7 +839,7 @@ def aggregate_findings(
     llm_degraded = False
 
     for r in results:
-        if r.get("llm_degraded"):
+        if r.get("llm_degraded") or r.get("degraded"):
             llm_degraded = True
         if r.get("type") == "ast":
             for fd in r.get("findings", []):
@@ -1125,18 +1126,6 @@ def persist_results(self: Any, data: dict[str, Any]) -> dict[str, Any]:
     is_direct = getattr(self.request, "called_directly", False)
     retries = getattr(self.request, "retries", 0)
 
-    # GitHub Rate Limit Check (§10.2 Branch E)
-    if is_mock_mode_enabled() and os.environ.get("MOCK_GITHUB_RATE_LIMIT", "").lower() in ("true", "1", "yes") and retries == 0:
-        raw_reset = os.environ.get("MOCK_GITHUB_RESET_TS")
-        reset_ts = float(raw_reset) if raw_reset and float(raw_reset) > 0 else (time.time() + 5)
-        eta = datetime.fromtimestamp(reset_ts, timezone.utc)
-        logger.warning(
-            "GitHub rate limit threshold reached (<100 remaining). Rescheduling %s to cp-retry at %s",
-            self.name,
-            eta.isoformat(),
-        )
-        raise self.retry(queue="cp-retry", eta=eta)
-
     # Failure injection (§7.6)
     if (settings.mock_github or settings.mock_llm) and (
         settings.mock_persist_failure
@@ -1399,13 +1388,17 @@ def scan_reanalysis_needed() -> int:
                     .all()
                 )
 
+                # Only match against findings that were actually posted; unposted findings still need posting
+                posted_findings = [ef for ef in existing_findings if ef.is_posted]
+                unposted_db_findings = [ef for ef in existing_findings if not ef.is_posted]
+
                 matched_count = 0
                 unmatched_findings: list[Finding] = []
 
                 for nf in mapped_llm_findings:
                     nf_family = get_vulnerability_family(nf)
                     matched_db_finding: DBFinding | None = None
-                    for ef in existing_findings:
+                    for ef in posted_findings:
                         ef_model = Finding(
                             file_path=ef.file_path,
                             line_start=ef.line_start,
@@ -1438,13 +1431,41 @@ def scan_reanalysis_needed() -> int:
                             matched_db_finding.explanation += " (Also confirmed by LLM analysis)"
                         matched_count += 1
                     else:
-                        unmatched_findings.append(nf)
+                        already_in_unposted = any(
+                            (ef.file_path == nf.file_path and ef.line_start == nf.line_start and ef.category == nf.category)
+                            for ef in unposted_db_findings
+                        )
+                        if not already_in_unposted:
+                            unmatched_findings.append(nf)
 
-                # Post ONE follow-up review if unmatched findings exist
-                if unmatched_findings:
-                    inline_unmatched = [f for f in unmatched_findings if f.is_in_diff and f.diff_line is not None]
+                # Collect all findings that must be posted in follow-up review:
+                # previously persisted unposted DB findings + newly detected unmatched findings
+                all_unposted_models: list[Finding] = list(unmatched_findings)
+                for udb in unposted_db_findings:
+                    all_unposted_models.append(
+                        Finding(
+                            file_path=udb.file_path,
+                            line_start=udb.line_start,
+                            line_end=udb.line_end,
+                            severity=udb.severity,
+                            category=udb.category,
+                            title=udb.title,
+                            explanation=udb.explanation,
+                            remediation=udb.remediation,
+                            confidence=udb.confidence,
+                            source=udb.source,
+                            raw_category=udb.raw_llm_category,
+                        )
+                    )
+
+                mapped_unposted = map_findings_to_diff_positions(all_unposted_models, diff_text) if all_unposted_models else []
+
+                # Post ONE follow-up review if any unposted findings exist
+                followup_posted = False
+                if mapped_unposted:
+                    inline_unposted = [f for f in mapped_unposted if f.is_in_diff and f.diff_line is not None]
                     comments_payload: list[dict[str, Any]] = []
-                    for uf in inline_unmatched:
+                    for uf in inline_unposted:
                         comment = {
                             "path": uf.file_path,
                             "line": uf.diff_line,
@@ -1460,7 +1481,7 @@ def scan_reanalysis_needed() -> int:
                         f"### 🛡️ CodePulse AI — Follow-up LLM analysis\n\n"
                         f"Follow-up semantic analysis has completed for commit `{run.head_sha[:8]}`.\n\n"
                         f"- **Confirmed existing findings:** {matched_count}\n"
-                        f"- **New findings detected:** {len(unmatched_findings)}"
+                        f"- **New findings detected:** {len(mapped_unposted)}"
                     )
 
                     review_payload = {
@@ -1471,7 +1492,6 @@ def scan_reanalysis_needed() -> int:
                     }
 
                     poster = get_github_poster()
-                    followup_posted = False
                     resp_id: int | None = None
                     try:
                         resp = poster.post_review(owner, repo_name, pr_number, review_payload)
@@ -1509,7 +1529,12 @@ def scan_reanalysis_needed() -> int:
                             retry_count=attempts,
                         )
 
-                    # Insert unmatched findings into DB (must never be lost)
+                    # Update unposted DB findings to is_posted = True if posting succeeded
+                    if followup_posted:
+                        for udb in unposted_db_findings:
+                            udb.is_posted = True
+
+                    # Insert newly detected unmatched findings into DB (must never be lost)
                     for uf in unmatched_findings:
                         is_posted = bool(followup_posted and uf.is_in_diff and uf.diff_line is not None)
                         db.add(
@@ -1553,7 +1578,7 @@ def scan_reanalysis_needed() -> int:
                 run.medium_count = sum(1 for f in all_db_findings if f.severity.lower() == "medium")
                 run.low_count = sum(1 for f in all_db_findings if f.severity.lower() == "low")
 
-                if not unmatched_findings or followup_posted:
+                if not mapped_unposted or followup_posted:
                     run.reanalysis_needed = False
                     reanalyzed_count += 1
                     logger.info("Re-analysis completed successfully for run %s", run_id)

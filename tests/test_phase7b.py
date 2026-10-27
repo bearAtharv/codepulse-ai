@@ -635,6 +635,7 @@ class TestRateLimitHardening:
         self, db_session: Session, test_repo_and_run: tuple[Repository, AnalysisRun]
     ) -> None:
         """If follow-up review posting fails, dead letter is logged via Branch F path and reanalysis_needed stays True."""
+        db_session.query(AnalysisRun).filter(AnalysisRun.reanalysis_needed == True).update({"reanalysis_needed": False})  # noqa: E712
         repo, run = test_repo_and_run
         run.reanalysis_needed = True
         run.head_sha = "1" * 40
@@ -713,6 +714,7 @@ class TestRateLimitHardening:
         self, db_session: Session, test_repo_and_run: tuple[Repository, AnalysisRun]
     ) -> None:
         """When follow-up review succeeds, review ID is stored in Redis without schema change."""
+        db_session.query(AnalysisRun).filter(AnalysisRun.reanalysis_needed == True).update({"reanalysis_needed": False})  # noqa: E712
         repo, run = test_repo_and_run
         run.reanalysis_needed = True
         run.head_sha = "1" * 40
@@ -773,3 +775,216 @@ class TestRateLimitHardening:
                 assert stored_id is not None
                 stored_id_str = stored_id if isinstance(stored_id, str) else stored_id.decode()
                 assert stored_id_str == "99887766"
+
+    def test_scan_reanalysis_needed_subsequent_scan_posts_previously_failed_unposted_findings(
+        self, db_session: Session, test_repo_and_run: tuple[Repository, AnalysisRun]
+    ) -> None:
+        """A subsequent scan must post previously unposted findings (is_posted=False) instead of dropping them."""
+        db_session.query(AnalysisRun).filter(AnalysisRun.reanalysis_needed == True).update({"reanalysis_needed": False})  # noqa: E712
+        repo, run = test_repo_and_run
+        run.reanalysis_needed = True
+        run.status = "completed"
+        run.github_review_id = 11112222
+        db_session.commit()
+
+        # Existing unposted finding from a prior failed follow-up attempt
+        unposted_finding = DBFinding(
+            id=uuid.uuid4(),
+            analysis_run_id=run.id,
+            file_path="src/app.py",
+            line_start=10,
+            line_end=10,
+            severity="critical",
+            category="A03",
+            title="Unposted Vulnerability",
+            explanation="Unposted injection flaw",
+            remediation="Fix it",
+            confidence="high",
+            source="llm",
+            is_posted=False,
+        )
+        db_session.add(unposted_finding)
+        db_session.commit()
+
+        save_payload_ref(
+            f"diff:{run.id}",
+            "--- a/src/app.py\n+++ b/src/app.py\n@@ -10,2 +10,2 @@\n-line\n+eval(user_input)\n",
+            ttl=300,
+        )
+
+        with patch("codepulse.worker.tasks.get_github_poster") as mock_poster_factory:
+            mock_poster = MagicMock()
+            mock_poster.post_review.return_value = {"id": 99887766}
+            mock_poster_factory.return_value = mock_poster
+
+            with patch("codepulse.worker.tasks.analyze_llm") as mock_analyze_llm:
+                from codepulse.analysis.llm_engine import LLMAnalysisResult
+                from codepulse.analysis.llm_schemas import (
+                    Confidence,
+                    LLMFindingItem,
+                    LLMResponseMetadata,
+                    LLMTokenUsage,
+                    Severity,
+                )
+                # LLM returns identical finding
+                mock_analyze_llm.return_value = LLMAnalysisResult(
+                    findings=[
+                        LLMFindingItem(
+                            file_path="src/app.py",
+                            line_start=10,
+                            line_end=10,
+                            category="A03",
+                            title="Unposted Vulnerability",
+                            explanation="Unposted injection flaw",
+                            remediation="Fix it",
+                            confidence=Confidence.high,
+                            severity=Severity.critical,
+                        )
+                    ],
+                    metadata=LLMResponseMetadata(
+                        model_version="gemini-3.7-flash",
+                        prompt_version="1.0",
+                        token_usage=LLMTokenUsage(input=10, output=10, total=20),
+                    ),
+                )
+
+                scan_reanalysis_needed()
+
+                db_session.expire_all()
+                reloaded_finding = db_session.get(DBFinding, unposted_finding.id)
+                assert reloaded_finding is not None
+                # Must now be marked as posted!
+                assert reloaded_finding.is_posted is True
+
+                reloaded_run = db_session.get(AnalysisRun, run.id)
+                assert reloaded_run is not None
+                assert reloaded_run.reanalysis_needed is False
+                # Primary review ID must remain untouched!
+                assert reloaded_run.github_review_id == 11112222
+
+                mock_poster.post_review.assert_called_once()
+                call_payload = mock_poster.post_review.call_args[0][3]
+                assert len(call_payload["comments"]) == 1
+                assert call_payload["comments"][0]["path"] == "src/app.py"
+
+
+class TestComposeAndTaskIsolationFixes:
+    """Verifies compose defaults, non-GitHub rate limit exclusion, and admin retry follow-up protection."""
+
+    def test_compose_failure_injection_variables_default_to_false(self) -> None:
+        """All failure-injection variables in docker-compose.yml must default to false."""
+        import re
+        from pathlib import Path
+
+        compose_text = Path("docker-compose.yml").read_text(encoding="utf-8")
+        # Find all ${VAR:-default} patterns for MOCK_
+        mock_matches = re.findall(r"\$\{(MOCK_[A-Z_]+):-([^}]+)\}", compose_text)
+        assert len(mock_matches) > 0, "No mock variables found in docker-compose.yml"
+
+        failure_flags = {
+            "MOCK_POSTING_FAILURE",
+            "MOCK_QUICK_RETRIES",
+            "MOCK_GITHUB_RATE_LIMIT",
+            "MOCK_LLM_FAILURE",
+            "MOCK_RATE_LIMIT",
+        }
+
+        for var_name, default_val in mock_matches:
+            if var_name in failure_flags:
+                assert default_val.lower() == "false", (
+                    f"Variable {var_name} must default to 'false' in docker-compose.yml, got '{default_val}'"
+                )
+
+    def test_non_github_tasks_never_wait_on_github_rate_limit(self) -> None:
+        """Tasks that do not call GitHub (aggregate_findings, persist_results) must not check GitHub rate limits."""
+        from codepulse.worker.tasks import persist_results
+
+        data = {
+            "context": {
+                "repository_full_name": "org/repo",
+                "pull_request_number": 1,
+                "analysis_run_id": str(uuid.uuid4()),
+            },
+            "findings": [],
+        }
+
+        with patch.dict(os.environ, {"MOCK_GITHUB": "true", "MOCK_GITHUB_RATE_LIMIT": "true"}):
+            with patch("codepulse.worker.tasks.persist_analysis_results", return_value=0):
+                # persist_results must NOT raise a Celery retry
+                res = persist_results(data)
+                assert res.get("status") == "completed"
+
+    def test_admin_retry_followup_review_preserves_primary_review_id(
+        self, db_session: Session, test_repo_and_run: tuple[Repository, AnalysisRun]
+    ) -> None:
+        """Admin retry of a follow-up review dead letter must NOT overwrite primary github_review_id."""
+        from codepulse.ingestion.admin import retry_posting
+        from codepulse.models.tables import DeadLetterLog
+
+        repo, run = test_repo_and_run
+        primary_review_id = 12345678
+        run.github_review_id = primary_review_id
+        run.reanalysis_needed = True
+        db_session.commit()
+
+        # Seed unposted finding
+        unposted = DBFinding(
+            id=uuid.uuid4(),
+            analysis_run_id=run.id,
+            file_path="src/app.py",
+            line_start=1,
+            line_end=1,
+            severity="high",
+            category="A03",
+            title="Late Finding",
+            explanation="Explanation",
+            remediation="Remediation",
+            confidence="high",
+            source="llm",
+            is_posted=False,
+        )
+        db_session.add(unposted)
+
+        # Seed follow-up review dead letter
+        dl = DeadLetterLog(
+            task_name="tasks.post_review_to_github",
+            task_id=uuid.uuid4(),
+            task_args={
+                "analysis_run_id": str(run.id),
+                "review_payload": {
+                    "event": "COMMENT",
+                    "body": "### 🛡️ CodePulse AI — Follow-up LLM analysis\n\nNew findings",
+                    "comments": [],
+                },
+            },
+            exception_type="RuntimeError",
+            exception_message="Failed",
+            traceback="Traceback",
+            retry_count=5,
+            resolved=False,
+        )
+        db_session.add(dl)
+        db_session.commit()
+
+        with patch("codepulse.ingestion.admin.get_github_poster") as mock_poster_factory:
+            mock_poster = MagicMock()
+            mock_poster.post_review.return_value = {"id": 99998888}
+            mock_poster_factory.return_value = mock_poster
+
+            resp = retry_posting(str(run.id), db=db_session, _=None)
+            assert resp.status_code == 200
+
+            db_session.expire_all()
+            reloaded_run = db_session.get(AnalysisRun, run.id)
+            assert reloaded_run is not None
+            # MUST NOT OVERWRITE PRIMARY REVIEW ID!
+            assert reloaded_run.github_review_id == primary_review_id
+            assert reloaded_run.reanalysis_needed is False
+
+            reloaded_dl = db_session.get(DeadLetterLog, dl.id)
+            assert reloaded_dl is not None
+            assert reloaded_dl.resolved is True
+
+            reloaded_unposted = db_session.get(DBFinding, unposted.id)
+            assert reloaded_unposted is not None
+            assert reloaded_unposted.is_posted is True

@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from codepulse.aggregation.github_poster import get_github_poster
 from codepulse.config import get_settings
-from codepulse.models.tables import AnalysisRun, DeadLetterLog
+from codepulse.models.tables import AnalysisRun, DeadLetterLog, Finding as DBFinding
 from codepulse.persistence.database import get_db_session, get_payload_ref
 
 logger = logging.getLogger(__name__)
@@ -144,9 +144,37 @@ def retry_posting(
     # 4. Success: update AnalysisRun and mark DeadLetterLog resolved
     review_id = response.get("id")
     now = datetime.now(timezone.utc)
-    run.review_posted_at = now
-    if review_id:
-        run.github_review_id = review_id
+
+    # Check if this retry is for a follow-up review or primary review
+    is_followup = bool(
+        run.github_review_id is not None
+        or (review_payload and "Follow-up LLM analysis" in review_payload.get("body", ""))
+    )
+
+    if is_followup:
+        # A follow-up review retry must NEVER overwrite the primary review ID!
+        if review_id:
+            try:
+                from codepulse.persistence.database import get_redis_client
+                redis_client = get_redis_client()
+                redis_client.set(f"reanalysis:review_id:{run_uuid}", str(review_id), ex=2592000)
+            except Exception:
+                pass
+        # Mark all unposted findings for this run as posted
+        unposted = db.query(DBFinding).filter(
+            DBFinding.analysis_run_id == run_uuid,
+            DBFinding.is_posted == False,
+        ).all()
+        for f in unposted:
+            f.is_posted = True
+        run.reanalysis_needed = False
+    else:
+        # Primary review retry
+        run.review_posted_at = now
+        if review_id:
+            run.github_review_id = review_id
+        for f in run.findings:
+            f.is_posted = True
 
     if target_dl:
         target_dl.resolved = True

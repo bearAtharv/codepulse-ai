@@ -65,8 +65,9 @@ services:
       MOCK_GITHUB_RATE_LIMIT: "${MOCK_GITHUB_RATE_LIMIT:-false}"
       MOCK_GITHUB_RESET_TS: "${MOCK_GITHUB_RESET_TS:-0}"
       GEMINI_RPM_LIMIT: "${GEMINI_RPM_LIMIT:-324}"
+      GEMINI_RATE_LIMIT_DEADLINE: "${GEMINI_RATE_LIMIT_DEADLINE:-60.0}"
       MOCK_POSTING_FAILURE: "${MOCK_POSTING_FAILURE:-false}"
-      MOCK_QUICK_RETRIES: "${MOCK_QUICK_RETRIES:-true}"
+      MOCK_QUICK_RETRIES: "${MOCK_QUICK_RETRIES:-false}"
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -92,8 +93,9 @@ services:
       MOCK_GITHUB_RATE_LIMIT: "${MOCK_GITHUB_RATE_LIMIT:-false}"
       MOCK_GITHUB_RESET_TS: "${MOCK_GITHUB_RESET_TS:-0}"
       GEMINI_RPM_LIMIT: "${GEMINI_RPM_LIMIT:-324}"
+      GEMINI_RATE_LIMIT_DEADLINE: "${GEMINI_RATE_LIMIT_DEADLINE:-60.0}"
       MOCK_POSTING_FAILURE: "${MOCK_POSTING_FAILURE:-false}"
-      MOCK_QUICK_RETRIES: "${MOCK_QUICK_RETRIES:-true}"
+      MOCK_QUICK_RETRIES: "${MOCK_QUICK_RETRIES:-false}"
     depends_on:
       postgres:
         condition: service_healthy
@@ -123,8 +125,9 @@ services:
       MOCK_GITHUB_RATE_LIMIT: "${MOCK_GITHUB_RATE_LIMIT:-false}"
       MOCK_GITHUB_RESET_TS: "${MOCK_GITHUB_RESET_TS:-0}"
       GEMINI_RPM_LIMIT: "${GEMINI_RPM_LIMIT:-324}"
+      GEMINI_RATE_LIMIT_DEADLINE: "${GEMINI_RATE_LIMIT_DEADLINE:-60.0}"
       MOCK_POSTING_FAILURE: "${MOCK_POSTING_FAILURE:-false}"
-      MOCK_QUICK_RETRIES: "${MOCK_QUICK_RETRIES:-true}"
+      MOCK_QUICK_RETRIES: "${MOCK_QUICK_RETRIES:-false}"
     depends_on:
       redis:
         condition: service_healthy
