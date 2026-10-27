@@ -175,7 +175,7 @@ services:
       - loki
 
   loki:
-    image: grafana/loki:3.1.1
+    image: grafana/loki:3.7.9
     user: "0:0"
     ports:
       - "127.0.0.1:3100:3100"

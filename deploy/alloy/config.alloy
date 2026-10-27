@@ -46,9 +46,8 @@ loki.process "codepulse" {
 
   stage.labels {
     values = {
-      level    = "level",
-      service  = "service",
-      trace_id = "trace_id",
+      level   = "level",
+      service = "service",
     }
   }
 }
