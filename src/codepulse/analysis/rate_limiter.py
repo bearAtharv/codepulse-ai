@@ -97,6 +97,9 @@ class TokenBucketRateLimiter:
             (False, wait_seconds) if insufficient tokens; wait_seconds indicates
             time until 1 token will be available.
         """
+        if self.rpm <= 0:
+            return False, 86400.0
+
         now = time.time()
         res = self._script(
             keys=[self.tokens_key, self.ts_key],

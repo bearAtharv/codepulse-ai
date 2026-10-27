@@ -357,3 +357,24 @@ However, Section 6.4 specifies that *"a `reanalysis_needed` flag is set on the `
 7. **GitHub Rate Limit Queue (`cp-retry`):**
    - When GitHub rate limit headers report `< 100` requests remaining (§10.2 Branch E), `fetch_pr_diff` and `post_review_to_github` tasks are rescheduled to the `cp-retry` queue with `eta` matching GitHub's `x-ratelimit-reset` timestamp.
 
+---
+
+## DEC-015: Rate Limiter Retry Jitter, Wait Deadline, and Degraded Fallback
+
+**Context:** Section 3.4.6 states:
+*"When a worker attempts to acquire a token and fails, it performs exponential backoff: 100ms, 200ms, 400ms, 800ms, capped at 2 seconds, up to 5 retries. If all retries are exhausted, the chunk is placed on a gemini-retry Celery queue with a 30-second ETA delay (visibility timeout), allowing other chunks to proceed."*
+In an asynchronous distributed worker pool where tasks reschedule via `self.retry(countdown=...)` with `max_retries=None`, multiple tasks waking up simultaneously can create thundering herd spikes, and prolonged quota exhaustion (or misconfigured RPM <= 0) can cause tasks to loop indefinitely.
+
+**Decisions (Judgment Calls & Specifications):**
+1. **Retry Countdown Jitter:**
+   - A uniform random jitter between 0.1s and 1.5s is added to the token wait seconds: `retry_delay = round(max(1.0, wait_seconds + random.uniform(0.1, 1.5)), 2)`.
+   - This prevents synchronized polling when the bucket refills.
+2. **Rate-Limit Wait Deadline & Degradation:**
+   - An overall rate-limit waiting deadline is tracked across task retries (default: 60.0s, configurable via `GEMINI_RATE_LIMIT_DEADLINE`).
+   - If the wait deadline is exceeded, or if `GEMINI_RPM_LIMIT <= 0`, `analyze_llm_task` immediately degrades to AST-only with `degraded=True` and `reanalysis_needed=True`, identical to the circuit-breaker-open path.
+   - This guarantees that tasks cannot loop forever under sustained quota exhaustion or misconfiguration.
+3. **Follow-Up Review Resilience & Review ID Storage:**
+   - If posting the follow-up review fails in `scan_reanalysis_needed`, it is logged to `dead_letter_log` via the Branch F path (`task_name="tasks.post_review_to_github"`). `reanalysis_needed` remains `True` and findings are safely stored in PostgreSQL (`is_posted=False`).
+   - When the follow-up review succeeds, its GitHub review ID is stored in Redis under `reanalysis:review_id:{run_id}` (30-day TTL) to maintain an audit trail without requiring an unapproved schema migration.
+
+

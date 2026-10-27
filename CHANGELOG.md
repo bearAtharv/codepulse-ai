@@ -28,6 +28,12 @@ All notable changes to CodePulse AI are documented here.
 - **Option A Re-analysis Engine** (`src/codepulse/worker/tasks.py`):
   - Distributed Redis locking (`lock:reanalyze:{run_id}`) prevents duplicate runs across worker instances.
   - Verifies PR head SHA is still current (superseded commits are marked `reanalysis_needed=False` without re-running).
+- **Resilience Hardening & Edge Case Handling** (`src/codepulse/analysis/rate_limiter.py`, `src/codepulse/worker/tasks.py`, `src/codepulse/aggregation/summary.py`):
+  - Uniform random jitter (0.1–1.5s) on rate limiter retry countdowns to prevent thundering herd spikes.
+  - Global rate-limit wait deadline (60s) and zero-quota handling: tasks gracefully degrade to AST-only mode with `reanalysis_needed=True` rather than looping indefinitely (DEC-015).
+  - Degraded review methodology disclosure explicitly notes that LLM was skipped per §6.4 rather than asserting dual-engine analysis.
+  - Follow-up review resilience: posting failures in `scan_reanalysis_needed` log to `dead_letter_log` via Branch F, retain `reanalysis_needed=True`, and persist all findings safely in PostgreSQL.
+  - Unexpected confidence values in `normalize_confidence` log warnings upon coercion.
   - Enforces a 3-attempt cap per run in Redis (`reanalyze:attempts:{run_id}`).
   - Uses cross-source vulnerability family matching (DEC-011) to merge matching LLM findings into existing AST findings (`source='merged'`, higher severity/confidence).
   - Posts a follow-up review comment containing strictly the newly discovered LLM findings. Idempotent on repeated executions.

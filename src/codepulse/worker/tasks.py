@@ -25,6 +25,7 @@ import hashlib
 import json
 import logging
 import os
+import random
 import time
 import traceback
 import uuid
@@ -186,9 +187,17 @@ def record_terminal_failure(
 def normalize_confidence(val: Any) -> str:
     """Normalize confidence to canonical DB values ('high', 'medium', 'low') per §3.7.1."""
     if isinstance(val, (int, float)):
-        return "high" if val >= 0.8 else ("medium" if val >= 0.5 else "low")
-    s = str(val).lower() if val else "medium"
-    return s if s in ("high", "medium", "low") else "medium"
+        res = "high" if val >= 0.8 else ("medium" if val >= 0.5 else "low")
+        logger.warning("Coerced numeric confidence %s to canonical '%s'", val, res)
+        return res
+    if isinstance(val, str):
+        s = val.strip().lower()
+        if s in ("high", "medium", "low"):
+            return s
+        logger.warning("Coerced unknown string confidence '%s' to 'medium'", val)
+        return "medium"
+    logger.warning("Coerced unexpected confidence value %r (%s) to 'medium'", val, type(val).__name__)
+    return "medium"
 
 
 def recover_pending_persistence(redis_client: Any, db: Any) -> int:
@@ -319,8 +328,9 @@ def fetch_pr_diff(self: Any, payload: dict[str, Any]) -> dict[str, Any]:
     retries = getattr(self.request, "retries", 0)
 
     # GitHub Rate Limit Check (§10.2 Branch E)
-    if is_mock_mode_enabled() and os.environ.get("MOCK_GITHUB_RATE_LIMIT", "").lower() in ("true", "1", "yes"):
-        reset_ts = float(os.environ.get("MOCK_GITHUB_RESET_TS", time.time() + 10))
+    if is_mock_mode_enabled() and os.environ.get("MOCK_GITHUB_RATE_LIMIT", "").lower() in ("true", "1", "yes") and retries == 0:
+        raw_reset = os.environ.get("MOCK_GITHUB_RESET_TS")
+        reset_ts = float(raw_reset) if raw_reset and float(raw_reset) > 0 else (time.time() + 5)
         eta = datetime.fromtimestamp(reset_ts, timezone.utc)
         logger.warning(
             "GitHub rate limit threshold reached (<100 remaining). Rescheduling %s to cp-retry at %s",
@@ -575,6 +585,7 @@ def analyze_llm_task(
     analysis_run_id: str,
     *,
     failure_retries: int = 0,
+    rate_limit_deadline: float | None = None,
 ) -> dict[str, Any]:
     """Execute LLM semantic reasoning on a batch of diff chunks (Step 13 of §10.1)."""
     diff_chunks = [AnalysisChunk.from_dict(d).to_diff_chunk() for d in chunks_data]
@@ -622,16 +633,52 @@ def analyze_llm_task(
         allowed, wait_seconds = rate_limiter.acquire(cost=1)
 
     if not allowed:
-        retry_delay = max(1, int(wait_seconds))
+        now_ts = time.time()
+        timeout_sec = float(os.environ.get("GEMINI_RATE_LIMIT_DEADLINE", "60.0"))
+        effective_deadline = (
+            rate_limit_deadline if rate_limit_deadline is not None else (now_ts + timeout_sec)
+        )
+
+        # Add jitter (§3.4.6, e.g. uniform 0.1 to 1.5 seconds)
+        jitter = random.uniform(0.1, 1.5)
+        retry_delay = round(max(1.0, wait_seconds + jitter), 2)
+
+        # Overall deadline check or misconfigured RPM <= 0: degrade to AST-only
+        if rate_limiter.rpm <= 0 or (now_ts + retry_delay > effective_deadline):
+            logger.warning(
+                "Gemini rate limit waiting deadline reached (%.1fs) or RPM=%.1f for run %s. Proceeding with AST-only in degraded mode (§3.4.6, §6.4).",
+                max(0.0, effective_deadline - now_ts),
+                rate_limiter.rpm,
+                analysis_run_id,
+            )
+            return {
+                "type": "llm",
+                "findings": [],
+                "usage": {
+                    "model_version": model_id,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "latency_ms": 0,
+                    "cache_hit": False,
+                },
+                "degraded": True,
+                "error": "Rate limit wait deadline exceeded",
+            }
+
         logger.warning(
-            "Gemini rate limit threshold reached for task %s. Scheduling retry in %ds (no worker blocking)",
-            analysis_run_id,
+            "Gemini rate limit threshold reached for task %s. Scheduling retry in %.2fs (jitter=%.2fs, deadline in %.1fs, no worker blocking)",
+            getattr(self.request, "id", analysis_run_id),
             retry_delay,
+            jitter,
+            effective_deadline - now_ts,
         )
         raise self.retry(
             countdown=retry_delay,
             max_retries=None,
-            kwargs={"failure_retries": failure_retries},
+            kwargs={
+                "failure_retries": failure_retries,
+                "rate_limit_deadline": effective_deadline,
+            },
         )
 
     # 3. Circuit Breaker (§6.3, §10.2 Branch D)
@@ -936,8 +983,9 @@ def post_review_to_github(self: Any, data: dict[str, Any]) -> dict[str, Any]:
     retries = getattr(self.request, "retries", 0)
 
     # GitHub Rate Limit Check (§10.2 Branch E)
-    if is_mock_mode_enabled() and os.environ.get("MOCK_GITHUB_RATE_LIMIT", "").lower() in ("true", "1", "yes"):
-        reset_ts = float(os.environ.get("MOCK_GITHUB_RESET_TS", time.time() + 10))
+    if is_mock_mode_enabled() and os.environ.get("MOCK_GITHUB_RATE_LIMIT", "").lower() in ("true", "1", "yes") and retries == 0:
+        raw_reset = os.environ.get("MOCK_GITHUB_RESET_TS")
+        reset_ts = float(raw_reset) if raw_reset and float(raw_reset) > 0 else (time.time() + 5)
         eta = datetime.fromtimestamp(reset_ts, timezone.utc)
         logger.warning(
             "GitHub rate limit threshold reached (<100 remaining). Rescheduling %s to cp-retry at %s",
@@ -1078,8 +1126,9 @@ def persist_results(self: Any, data: dict[str, Any]) -> dict[str, Any]:
     retries = getattr(self.request, "retries", 0)
 
     # GitHub Rate Limit Check (§10.2 Branch E)
-    if is_mock_mode_enabled() and os.environ.get("MOCK_GITHUB_RATE_LIMIT", "").lower() in ("true", "1", "yes"):
-        reset_ts = float(os.environ.get("MOCK_GITHUB_RESET_TS", time.time() + 10))
+    if is_mock_mode_enabled() and os.environ.get("MOCK_GITHUB_RATE_LIMIT", "").lower() in ("true", "1", "yes") and retries == 0:
+        raw_reset = os.environ.get("MOCK_GITHUB_RESET_TS")
+        reset_ts = float(raw_reset) if raw_reset and float(raw_reset) > 0 else (time.time() + 5)
         eta = datetime.fromtimestamp(reset_ts, timezone.utc)
         logger.warning(
             "GitHub rate limit threshold reached (<100 remaining). Rescheduling %s to cp-retry at %s",
@@ -1422,35 +1471,47 @@ def scan_reanalysis_needed() -> int:
                     }
 
                     poster = get_github_poster()
+                    followup_posted = False
+                    resp_id: int | None = None
                     try:
                         resp = poster.post_review(owner, repo_name, pr_number, review_payload)
+                        resp_id = resp.get("id")
+                        followup_posted = True
                         logger.info(
                             "Follow-up review posted for %s#%d (review_id=%s)",
                             repo.full_name,
                             pr_number,
-                            resp.get("id"),
+                            resp_id,
                         )
+                        if resp_id is not None:
+                            # Record follow-up review ID in Redis without schema change
+                            redis_client.set(f"reanalysis:review_id:{run_id}", str(resp_id), ex=2592000)
                     except Exception as post_err:
                         logger.error(
-                            "Failed to post follow-up review for %s#%d: %s",
+                            "Failed to post follow-up review for %s#%d: %s. Preserving reanalysis_needed flag and recording dead letter.",
                             repo.full_name,
                             pr_number,
                             post_err,
                         )
                         record_dead_letter(
-                            task_name="tasks.scan_reanalysis_needed",
+                            task_name="tasks.post_review_to_github",
                             task_id=str(uuid.uuid4()),
                             task_args={
                                 "analysis_run_id": run_id,
                                 "review_payload": review_payload,
+                                "context": {
+                                    "repository_full_name": repo.full_name,
+                                    "pull_request_number": pr_number,
+                                    "analysis_run_id": run_id,
+                                },
                             },
                             exc=post_err,
                             retry_count=attempts,
                         )
 
-                    # Insert unmatched findings into DB
+                    # Insert unmatched findings into DB (must never be lost)
                     for uf in unmatched_findings:
-                        is_posted = bool(uf.is_in_diff and uf.diff_line is not None)
+                        is_posted = bool(followup_posted and uf.is_in_diff and uf.diff_line is not None)
                         db.add(
                             DBFinding(
                                 id=uuid.uuid4(),
@@ -1484,18 +1545,25 @@ def scan_reanalysis_needed() -> int:
                     cache_hit=False,
                 )
 
-                # Update AnalysisRun counts & clear flag
+                # Update AnalysisRun counts & clear flag ONLY IF follow-up review succeeded or no unmatched findings needed posting
                 all_db_findings = db.query(DBFinding).filter(DBFinding.analysis_run_id == run.id).all()
                 run.total_findings = len(all_db_findings)
                 run.critical_count = sum(1 for f in all_db_findings if f.severity.lower() == "critical")
                 run.high_count = sum(1 for f in all_db_findings if f.severity.lower() == "high")
                 run.medium_count = sum(1 for f in all_db_findings if f.severity.lower() == "medium")
                 run.low_count = sum(1 for f in all_db_findings if f.severity.lower() == "low")
-                run.reanalysis_needed = False
+
+                if not unmatched_findings or followup_posted:
+                    run.reanalysis_needed = False
+                    reanalyzed_count += 1
+                    logger.info("Re-analysis completed successfully for run %s", run_id)
+                else:
+                    logger.warning(
+                        "Re-analysis findings recorded but follow-up review posting failed for run %s. Keeping reanalysis_needed=True for retry.",
+                        run_id,
+                    )
 
                 db.commit()
-                reanalyzed_count += 1
-                logger.info("Re-analysis completed successfully for run %s", run_id)
 
             finally:
                 redis_client.delete(lock_key)

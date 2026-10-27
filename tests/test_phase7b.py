@@ -525,3 +525,251 @@ class TestPersistenceDrainBeatTask:
             assert findings[0].confidence == "high"
         finally:
             redis_client.delete(f"dead_letter:persist:{run.id}")
+
+
+# ── 8. Rate Limit Jitter, Deadline & Degradation Tests ───────────────────
+
+
+class TestRateLimitHardening:
+    """Verifies jitter, wait deadlines, RPM=0 safety, and degraded methodology disclosures."""
+
+    def test_normalize_confidence_logs_warning_on_unexpected_value(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """normalize_confidence must log a warning on unexpected/coerced values."""
+        import logging
+        from codepulse.worker.tasks import normalize_confidence
+
+        with caplog.at_level(logging.WARNING):
+            c1 = normalize_confidence(0.95)
+            assert c1 == "high"
+            assert "Coerced numeric confidence 0.95 to canonical 'high'" in caplog.text
+
+            caplog.clear()
+            c2 = normalize_confidence("bogus_confidence")
+            assert c2 == "medium"
+            assert "Coerced unknown string confidence 'bogus_confidence' to 'medium'" in caplog.text
+
+            caplog.clear()
+            c3 = normalize_confidence(None)
+            assert c3 == "medium"
+            assert "Coerced unexpected confidence value None" in caplog.text
+
+    def test_degraded_review_methodology_discloses_llm_skipped(self) -> None:
+        """When degraded_mode=True, methodology block must disclose LLM skipped, not dual-analysis."""
+        from codepulse.aggregation.models import DeduplicationResult
+        from codepulse.aggregation.summary import compose_review_summary
+
+        dedup_res = DeduplicationResult(findings=[], total_raw=0, merged_count=0, truncated_count=0)
+        # 1. Normal mode: claims dual-analysis pipeline
+        normal_body = compose_review_summary(
+            dedup_result=dedup_res,
+            files_analyzed=1,
+            analysis_duration_ms=50,
+            model_version="gemini-3.7-flash",
+            degraded_mode=False,
+        )
+        assert "using a dual-analysis pipeline" in normal_body
+        assert "Multi-chunk reasoning via Google `gemini-3.7-flash`" in normal_body
+
+        # 2. Degraded mode: must NOT claim dual-analysis and must state LLM was skipped
+        degraded_body = compose_review_summary(
+            dedup_result=dedup_res,
+            files_analyzed=1,
+            analysis_duration_ms=50,
+            model_version="gemini-3.7-flash",
+            degraded_mode=True,
+        )
+        assert "using a dual-analysis pipeline" not in degraded_body
+        assert "Multi-chunk reasoning via Google `gemini-3.7-flash`" not in degraded_body
+        assert "in degraded AST-only mode:" in degraded_body
+        assert "Skipped (service unavailable; re-analysis scheduled per §6.4)" in degraded_body
+
+    def test_rate_limit_retry_includes_jitter(self) -> None:
+        """Rate limit retry countdown must include random jitter."""
+        chunk = make_chunk_dict()
+        run_id = str(uuid.uuid4())
+        unique_repo = f"org/repo-jitter-{uuid.uuid4()}"
+
+        with patch.object(analyze_llm_task, "retry", side_effect=RuntimeError("ScheduledRetry")) as mock_retry:
+            with patch.object(analyze_llm_task.request, "called_directly", False, create=True):
+                with patch.dict(os.environ, {"MOCK_LLM": "true", "MOCK_RATE_LIMIT": "true", "MOCK_RATE_LIMIT_WAIT": "5.0"}):
+                    with pytest.raises(RuntimeError):
+                        analyze_llm_task([chunk], unique_repo, "python", run_id)
+                    mock_retry.assert_called_once()
+                    countdown = mock_retry.call_args[1]["countdown"]
+                    # wait_seconds is 5.0, jitter is [0.1, 1.5] -> countdown in (5.0, 7.0]
+                    assert countdown > 5.0
+                    assert countdown <= 7.0
+
+    def test_rate_limit_deadline_exceeded_degrades_to_ast_only(self) -> None:
+        """When rate limit wait exceeds overall deadline, task must degrade to AST-only without retrying."""
+        chunk = make_chunk_dict()
+        run_id = str(uuid.uuid4())
+        unique_repo = f"org/repo-deadline-{uuid.uuid4()}"
+
+        # Deadline already passed (now - 10s)
+        expired_deadline = time.time() - 10.0
+
+        with patch.dict(os.environ, {"MOCK_LLM": "true", "MOCK_RATE_LIMIT": "true", "MOCK_RATE_LIMIT_WAIT": "5.0"}):
+            res = analyze_llm_task(
+                [chunk], unique_repo, "python", run_id, rate_limit_deadline=expired_deadline
+            )
+            assert res["degraded"] is True
+            assert res["error"] == "Rate limit wait deadline exceeded"
+            assert res["findings"] == []
+
+    def test_rate_limit_rpm_zero_degrades_immediately_without_infinite_loop(self) -> None:
+        """When RPM is misconfigured to 0, task must degrade immediately rather than looping forever."""
+        chunk = make_chunk_dict()
+        run_id = str(uuid.uuid4())
+        unique_repo = f"org/repo-rpm0-{uuid.uuid4()}"
+
+        with patch.dict(os.environ, {"MOCK_LLM": "true", "GEMINI_RPM_LIMIT": "0"}):
+            res = analyze_llm_task([chunk], unique_repo, "python", run_id)
+            assert res["degraded"] is True
+            assert res["error"] == "Rate limit wait deadline exceeded"
+            assert res["findings"] == []
+
+    def test_scan_reanalysis_needed_followup_failure_records_dead_letter_and_preserves_reanalysis_needed(
+        self, db_session: Session, test_repo_and_run: tuple[Repository, AnalysisRun]
+    ) -> None:
+        """If follow-up review posting fails, dead letter is logged via Branch F path and reanalysis_needed stays True."""
+        repo, run = test_repo_and_run
+        run.reanalysis_needed = True
+        run.head_sha = "1" * 40
+        db_session.commit()
+
+        redis_client = get_redis_client()
+        # Mock Diff
+        from codepulse.persistence.database import save_payload_ref
+        save_payload_ref(
+            f"diff:{run.id}",
+            "--- a/src/app.py\n+++ b/src/app.py\n@@ -1,2 +1,2 @@\n-line\n+import os; os.system(cmd)\n",
+            ttl=300,
+        )
+
+        with patch("codepulse.worker.tasks.get_github_poster") as mock_poster_factory:
+            mock_poster = MagicMock()
+            mock_poster.post_review.side_effect = RuntimeError("GitHub 502 Bad Gateway")
+            mock_poster_factory.return_value = mock_poster
+
+            with patch("codepulse.worker.tasks.analyze_llm") as mock_analyze_llm:
+                from codepulse.analysis.llm_engine import LLMAnalysisResult
+                from codepulse.analysis.llm_schemas import (
+                    Confidence,
+                    LLMFindingItem,
+                    LLMResponseMetadata,
+                    LLMTokenUsage,
+                    Severity,
+                )
+                mock_analyze_llm.return_value = LLMAnalysisResult(
+                    findings=[
+                        LLMFindingItem(
+                            file_path="src/app.py",
+                            line_start=1,
+                            line_end=1,
+                            category="A03",
+                            title="Command Injection",
+                            explanation="os.system with untrusted input",
+                            remediation="Use subprocess",
+                            confidence=Confidence.high,
+                            severity=Severity.critical,
+                        )
+                    ],
+                    metadata=LLMResponseMetadata(
+                        model_version="gemini-3.7-flash",
+                        prompt_version="1.0",
+                        token_usage=LLMTokenUsage(input=10, output=10, total=20),
+                    ),
+                )
+
+                scan_reanalysis_needed()
+
+                db_session.expire_all()
+                reloaded_run = db_session.get(AnalysisRun, run.id)
+                assert reloaded_run is not None
+                # Flag must NOT be cleared because review post failed
+                assert reloaded_run.reanalysis_needed is True
+                # Finding must NOT be lost: stored in DB with is_posted=False
+                findings = db_session.query(DBFinding).filter(DBFinding.analysis_run_id == run.id).all()
+                assert len(findings) == 1
+                assert findings[0].title == "Command Injection"
+                assert findings[0].is_posted is False
+
+                # Branch F dead-letter entry recorded
+                from codepulse.models.tables import DeadLetterLog
+                dead_letter = (
+                    db_session.query(DeadLetterLog)
+                    .filter(DeadLetterLog.task_name == "tasks.post_review_to_github")
+                    .order_by(DeadLetterLog.id.desc())
+                    .first()
+                )
+                assert dead_letter is not None
+                assert dead_letter.task_args.get("analysis_run_id") == str(run.id)
+                assert dead_letter.resolved is False
+
+    def test_scan_reanalysis_needed_stores_followup_review_id_in_redis(
+        self, db_session: Session, test_repo_and_run: tuple[Repository, AnalysisRun]
+    ) -> None:
+        """When follow-up review succeeds, review ID is stored in Redis without schema change."""
+        repo, run = test_repo_and_run
+        run.reanalysis_needed = True
+        run.head_sha = "1" * 40
+        db_session.commit()
+
+        redis_client = get_redis_client()
+        from codepulse.persistence.database import save_payload_ref
+        save_payload_ref(
+            f"diff:{run.id}",
+            "--- a/src/app.py\n+++ b/src/app.py\n@@ -1,2 +1,2 @@\n-line\n+import os; os.system(cmd)\n",
+            ttl=300,
+        )
+
+        with patch("codepulse.worker.tasks.get_github_poster") as mock_poster_factory:
+            mock_poster = MagicMock()
+            mock_poster.post_review.return_value = {"id": 99887766}
+            mock_poster_factory.return_value = mock_poster
+
+            with patch("codepulse.worker.tasks.analyze_llm") as mock_analyze_llm:
+                from codepulse.analysis.llm_engine import LLMAnalysisResult
+                from codepulse.analysis.llm_schemas import (
+                    Confidence,
+                    LLMFindingItem,
+                    LLMResponseMetadata,
+                    LLMTokenUsage,
+                    Severity,
+                )
+                mock_analyze_llm.return_value = LLMAnalysisResult(
+                    findings=[
+                        LLMFindingItem(
+                            file_path="src/app.py",
+                            line_start=1,
+                            line_end=1,
+                            category="A03",
+                            title="Command Injection",
+                            explanation="os.system with untrusted input",
+                            remediation="Use subprocess",
+                            confidence=Confidence.high,
+                            severity=Severity.critical,
+                        )
+                    ],
+                    metadata=LLMResponseMetadata(
+                        model_version="gemini-3.7-flash",
+                        prompt_version="1.0",
+                        token_usage=LLMTokenUsage(input=10, output=10, total=20),
+                    ),
+                )
+
+                scan_reanalysis_needed()
+
+                db_session.expire_all()
+                reloaded_run = db_session.get(AnalysisRun, run.id)
+                assert reloaded_run is not None
+                assert reloaded_run.reanalysis_needed is False
+
+                # Verify follow-up review ID stored in Redis
+                stored_id = redis_client.get(f"reanalysis:review_id:{run.id}")
+                assert stored_id is not None
+                stored_id_str = stored_id if isinstance(stored_id, str) else stored_id.decode()
+                assert stored_id_str == "99887766"

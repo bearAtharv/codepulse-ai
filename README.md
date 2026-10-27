@@ -305,7 +305,7 @@ The `analysis_runs` table has a unique constraint on `(repository_id, pull_reque
   - Celery Beat scheduled periodic task `tasks.scan_reanalysis_needed` runs every 5 minutes (300s) to re-analyze degraded runs using Option A delivery: merges matching LLM findings into AST findings and posts follow-up review with new findings only.
   - Celery Beat scheduled periodic task `tasks.drain_pending_persistence_task` runs every 60s to recover and persist fallback data from Redis.
 - **GitHub Rate Limit Handling (`cp-retry`)** (`src/codepulse/worker/tasks.py`): Tasks encountering GitHub remaining quota < 100 are rescheduled to `cp-retry` with `eta` at reset timestamp.
-- **11 unit & integration tests** (`tests/test_phase7b.py`) covering rate limiter retry scheduling, response cache invalidation/telemetry, circuit breaker transitions, degraded review formatting, re-analysis merging/supersession, and attempt caps. Total test suite: **318 tests**.
+- **18 unit & integration tests** (`tests/test_phase7b.py`) covering rate limiter retry scheduling, response cache invalidation/telemetry, circuit breaker transitions, degraded review formatting, re-analysis merging/supersession, attempt caps, rate limit jitter, wait deadline fallback, and follow-up review resilience. Total test suite: **330 tests**.
 
 ---
 
