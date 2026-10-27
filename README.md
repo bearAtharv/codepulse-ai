@@ -343,8 +343,9 @@ The `analysis_runs` table has a unique constraint on `(repository_id, pull_reque
   - `SecretAndCodeSanitizer` logging filter automatically intercepting log records to redact Gemini API keys (`AIza...`), GitHub classic & fine-grained PATs (`ghp_...`, `github_pat_...`), HTTP Bearer tokens, JWTs, database connection string passwords, private keys, and unified diff patches (`diff --git`, `@@ -... @@`).
   - Prohibits customer source code and raw diff chunks from appearing in logs.
 - **Loki & Grafana Alloy Telemetry Pipeline** (`deploy/loki/`, `deploy/alloy/`, `docker-compose.yml`):
-  - Grafana Loki 3.1.1 configured with single-binary TSDB v13 schema and filesystem chunk storage on `127.0.0.1:3100`.
-  - Grafana Alloy v1.4.2 collector discovering local Docker containers via `/var/run/docker.sock`, parsing JSON log entries, extracting structured labels (`service`, `level`, `trace_id`), and shipping batches to Loki.
+  - Grafana Loki 3.7.9 configured with single-binary TSDB v13 schema and filesystem chunk storage on `127.0.0.1:3100`.
+  - Grafana Alloy v1.21.2 collector discovering local Docker containers via `/var/run/docker.sock`, parsing JSON log entries, extracting low-cardinality structured labels (`service`, `level`, `container`), and shipping batches to Loki.
+  - `trace_id` is excluded from index labels to prevent high-cardinality stream explosion; queries filter via LogQL JSON parsing (`| json | trace_id = "..."`).
   - Provisioned Grafana Loki datasource (`LOKI_DEFAULT`) and `Application Logs` dashboard (`application-logs`).
 - **15 unit & integration tests** (`tests/test_logging.py`). Total test suite: **363 tests**.
 

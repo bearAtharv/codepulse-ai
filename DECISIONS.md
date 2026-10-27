@@ -506,9 +506,47 @@ Reviewing these requirements against production realities and upstream ecosystem
    - Customer source code fragments and full diffs are strictly prohibited from appearing in application logs.
 
 4. **Loki and Grafana Alloy Telemetry Pipeline:**
-   - **Loki (`3.1.1`):** Deployed in single-binary mode with TSDB v13 schema and filesystem chunk storage on isolated port `127.0.0.1:3100:3100`.
-   - **Grafana Alloy (`v1.4.2`):** Modern replacement for Promtail running as a Docker daemon collector. Mounts `/var/run/docker.sock` in read-only mode to discover `codepulse-*` containers, parses JSON logs via pipeline stages, extracts labels (`service`, `level`, `trace_id`), and forwards batches to Loki.
+   - **Loki (`3.7.9`):** Deployed in single-binary mode with TSDB v13 schema and filesystem chunk storage on isolated port `127.0.0.1:3100:3100`.
+   - **Grafana Alloy (`v1.21.2`):** Modern replacement for Promtail running as a Docker daemon collector. Mounts `/var/run/docker.sock` in read-only mode to discover `codepulse-*` containers, parses JSON logs via pipeline stages, extracts low-cardinality labels (`service`, `level`, `container`), and forwards batches to Loki.
+   - **Loki Label Cardinality Enforcement:** `trace_id` is strictly excluded from Loki index labels (`stage.labels`) to prevent high-cardinality stream explosion. Trace lookups are performed dynamically via LogQL JSON expressions (`| json | trace_id = "..."`).
    - **Grafana Provisioning:** Loki datasource (`uid: LOKI_DEFAULT`) and `Application Logs` dashboard (`uid: application-logs`) provisioned automatically with log volume time-series and live streaming logs panel.
+
+---
+
+## DEC-019: Component Upgrades, Container Socket Clarification, and Observability Metrics Alignment
+
+**Context:** Phase 8a-ii requires verifying component version currency, pinning exact patch tags, rotating credentials, clarifying the local Docker daemon socket mount in Alloy, documenting trace/span context boundaries, and justifying non-§9.2 metrics.
+
+**Decisions & Specifications:**
+
+1. **Exact Component Patch Version Upgrades:**
+   - **Prometheus (`prom/prometheus:v3.15.1`):** Upgraded from v2.54.1 to v3.15.1 (Released 2026-10-21, `https://github.com/prometheus/prometheus/releases/tag/v3.15.1`). Verified all scrapers and recording rules (`codepulse_analysis_latency_p99`) load cleanly.
+   - **Grafana (`grafana/grafana:13.3.0`):** Upgraded from 11.2.0 to 13.3.0 (Released 2026-10-27, `https://github.com/grafana/grafana/releases/tag/v13.3.0`). Verified datasource health (`PBFA97CFB590B2093`, `LOKI_DEFAULT`) and all four provisioned dashboards.
+   - **Loki (`grafana/loki:3.7.9`):** Upgraded from 3.1.1 to 3.7.9 (Released 2026-10-20, `https://github.com/grafana/loki/releases/tag/v3.7.9`). Verified `/ready` endpoint and schema compatibility.
+   - **Alloy (`grafana/alloy:v1.21.2`):** Upgraded from v1.4.2 to v1.21.2 (Released 2026-10-22, `https://github.com/grafana/alloy/releases/tag/v1.21.2`). Verified Alloy configuration syntax and log delivery to Loki.
+   - **PostgreSQL (`postgres:16.15-alpine`):** Pinned to exact patch release 16.15-alpine (Released 2026-08-13, `https://www.postgresql.org/docs/release/16.15/`).
+   - **Redis (`redis:7.2.17-alpine`):** Pinned to exact patch release 7.2.17-alpine (Released August 2026, `https://github.com/redis/redis/releases/tag/7.2.17`).
+
+2. **Redis 7.2 Licensing Rationale:**
+   - Redis changed its licensing model starting in Redis 7.4 from the open-source BSD 3-Clause license to dual source-available licenses (SSPLv1 and RSALv2).
+   - Redis 7.2 remains the latest open-source, BSD-3-licensed release series.
+   - Tested and verified: Kombu/Celery broker compatibility, Lua token-bucket rate limiter atomic script execution (`(True, 0.0)`), and circuit breaker state transitions operate identically and without regression.
+
+3. **Alloy Docker Socket Mount (`/var/run/docker.sock:ro`):**
+   - In the local Docker Compose development environment, Alloy uses `discovery.docker` and mounts `/var/run/docker.sock` in read-only mode (`:ro`) to discover running containers and tail log streams.
+   - **Development-Only Caveat:** This socket mount is strictly a local Compose convenience. In production Kubernetes environments (Phase 8b), mounting the host Docker/CRI socket is prohibited by security policy. Instead, Alloy will deploy as a Kubernetes DaemonSet using `local.file_match` to scrape container logs directly from node log files (`/var/log/pods/*/*/*.log`) without host socket privileges.
+
+4. **Span ID Context Scope (Phase 8a-ii vs Phase 8a-iii):**
+   - Under Phase 8a-ii, `trace_id` (32 hex characters) uniquely identifies the end-to-end webhook request and Celery pipeline execution, while `span_id` (16 hex characters) is generated at webhook entry and forwarded through task headers/payloads.
+   - In Celery tasks, `span_id` currently reflects this common execution span identifier. Full distributed span derivation with distinct child span IDs and parent-span linkages will be added in Phase 8a-iii with the OpenTelemetry SDK.
+
+5. **Observability Metric Rationales (Canonical §9.2 vs Extended Metrics):**
+   - Section 9.2 specifies 13 core metrics: `codepulse_webhooks_received_total`, `codepulse_analysis_runs_total`, `codepulse_pipeline_duration_seconds`, `codepulse_end_to_end_duration_seconds`, `codepulse_findings_total`, `codepulse_ast_rules_triggered_total`, `codepulse_llm_cache_hits_total`, `codepulse_llm_cache_misses_total`, `codepulse_llm_tokens_consumed_total`, `codepulse_rate_limit_wait_seconds`, `codepulse_circuit_breaker_state`, `codepulse_dead_letter_total`, and `codepulse_github_api_rate_limit_remaining`.
+   - All 13 canonical §9.2 metrics are fully registered and emitted.
+   - Additional metrics registered during implementation are justified as follows:
+     - `codepulse_llm_tokens_total` and `codepulse_llm_cost_cents_total`: Added for granular LLM token accounting by direction and financial cost attribution (in cents) across model invocations.
+     - `codepulse_analysis_duration_seconds`: Emits granular per-phase latencies (`fetch`, `ast`, `llm`, `aggregate`, `post`) to support dashboard breakdown of internal pipeline stages without colliding with `codepulse_pipeline_duration_seconds` (which measures full run duration by status).
+
 
 
 

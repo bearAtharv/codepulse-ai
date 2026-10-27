@@ -17,9 +17,13 @@ All notable changes to CodePulse AI are documented here.
   - `SecretAndCodeSanitizer` logging filter automatically intercepting log records to redact Gemini API keys (`AIza...`), GitHub classic & fine-grained PATs (`ghp_...`, `github_pat_...`), HTTP Bearer tokens, JWTs, database connection string passwords, private keys, and unified diff patches (`diff --git`, `@@ -... @@`).
   - Prohibits customer source code and raw diff chunks from appearing in logs.
 - **Loki & Grafana Alloy Telemetry Pipeline** (`deploy/loki/`, `deploy/alloy/`, `docker-compose.yml`):
-  - Grafana Loki 3.1.1 configured with single-binary TSDB v13 schema and filesystem chunk storage.
-  - Grafana Alloy v1.4.2 collector discovering local Docker containers via `/var/run/docker.sock`, parsing JSON log entries, extracting structured labels (`service`, `level`, `trace_id`), and shipping batches to Loki.
+  - Grafana Loki 3.7.9 configured with single-binary TSDB v13 schema and filesystem chunk storage.
+  - Grafana Alloy v1.21.2 collector discovering local Docker containers via `/var/run/docker.sock`, parsing JSON log entries, extracting low-cardinality structured labels (`service`, `level`, `container`), and shipping batches to Loki.
+  - Removed `trace_id` from Loki index labels to avoid high-cardinality stream explosion, querying dynamically via LogQL JSON parsing.
   - Provisioned Grafana Loki datasource (`LOKI_DEFAULT`) and `Application Logs` dashboard (`application-logs`).
+- **Component Version Upgrades & Patch Pinning (DEC-019)**:
+  - Upgraded Prometheus to v3.15.1, Grafana to 13.3.0, Loki to 3.7.9, Alloy to v1.21.2.
+  - Pinned PostgreSQL to 16.15-alpine and Redis to 7.2.17-alpine (BSD-3 licensed LTS series).
 - **15 unit & integration tests** (`tests/test_logging.py`). Total test suite: **363 tests**.
 
 ## [Phase 8a-i] — Metrics, Prometheus, and Grafana Dashboards
