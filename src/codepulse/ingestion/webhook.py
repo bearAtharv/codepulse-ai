@@ -13,6 +13,13 @@ from sqlalchemy.orm import Session
 from codepulse.config import Settings, get_settings
 from codepulse.ingestion import service
 from codepulse.metrics import record_webhook_received
+from codepulse.observability import (
+    generate_span_id,
+    generate_trace_id,
+    get_span_id,
+    get_trace_id,
+    set_trace_context,
+)
 from codepulse.persistence.database import get_db_session, get_redis_client
 import hashlib
 import hmac
@@ -86,6 +93,16 @@ async def handle_webhook(
     delivery_id: str = request.headers.get("X-GitHub-Delivery", "")
     action: str | None = payload.get("action")
     repo_full_name: str | None = (payload.get("repository") or {}).get("full_name")
+    pr_dict = payload.get("pull_request") or {}
+    pr_number_raw = payload.get("number") or pr_dict.get("number")
+    pr_num = int(pr_number_raw) if pr_number_raw is not None else None
+    head_sha_val = (pr_dict.get("head") or {}).get("sha")
+
+    set_trace_context(
+        repository=repo_full_name,
+        pr_number=pr_num,
+        head_sha=head_sha_val,
+    )
 
     # ── Step 3: Handle ping ──────────────────────────────────────────────
     if event_type == "ping":
@@ -146,7 +163,16 @@ async def handle_webhook(
         )
         return Response(status_code=200)
 
-    # ── Step 6: Enqueue Celery task ──────────────────────────────────────
+    # ── Step 6: Enqueue Celery task with trace context (§9.3) ────────────
+    active_trace_id = get_trace_id() or generate_trace_id()
+    active_span_id = get_span_id() or generate_span_id()
+
+    set_trace_context(
+        trace_id=active_trace_id,
+        span_id=active_span_id,
+        analysis_run_id=str(run_id),
+    )
+
     orchestrate_pr_analysis.apply_async(
         kwargs={
             "installation_id": installation_id,
@@ -157,6 +183,12 @@ async def handle_webhook(
             "pr_author": pr_author,
             "webhook_received_at": webhook_received_at.isoformat(),
             "analysis_run_id": str(run_id),
+            "trace_id": active_trace_id,
+            "span_id": active_span_id,
+        },
+        headers={
+            "trace_id": active_trace_id,
+            "span_id": active_span_id,
         },
         queue="cp-high",
     )

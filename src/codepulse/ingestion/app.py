@@ -5,14 +5,24 @@ from __future__ import annotations
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
+from codepulse.observability import (
+    configure_logging,
+    generate_span_id,
+    generate_trace_id,
+    parse_traceparent,
+    trace_scope,
+)
 from codepulse.metrics.server import start_metrics_server
 from codepulse.persistence.database import get_engine, get_redis_client
 from codepulse.ingestion.admin import router as admin_router
 from codepulse.ingestion.webhook import router as webhook_router
+
+# Initialize structured logging (§9.4, DEC-018)
+configure_logging(service_name="codepulse-web")
 
 
 @asynccontextmanager
@@ -41,6 +51,23 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+
+@app.middleware("http")
+async def trace_id_middleware(request: Request, call_next):
+    """Propagate or generate W3C trace ID and set X-Trace-Id header (§9.3)."""
+    traceparent = request.headers.get("traceparent")
+    parsed_tp = parse_traceparent(traceparent) if traceparent else None
+    if parsed_tp:
+        trace_id, _ = parsed_tp
+    else:
+        trace_id = request.headers.get("X-Trace-Id") or generate_trace_id()
+    span_id = generate_span_id()
+    with trace_scope(trace_id=trace_id, span_id=span_id, service="codepulse-web"):
+        response = await call_next(request)
+        response.headers["X-Trace-Id"] = trace_id
+        return response
+
 
 app.include_router(webhook_router)
 app.include_router(admin_router)

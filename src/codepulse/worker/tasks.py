@@ -81,6 +81,7 @@ from codepulse.metrics import (
     record_pipeline_duration,
 )
 from codepulse.models.tables import AnalysisRun, DeadLetterLog, Finding as DBFinding
+from codepulse.observability import get_span_id, get_trace_id, set_trace_context
 from codepulse.persistence.database import (
     get_payload_ref,
     get_redis_client,
@@ -275,8 +276,23 @@ def orchestrate_pr_analysis(
     pr_author: str,
     webhook_received_at: str,
     analysis_run_id: str,
+    trace_id: str | None = None,
+    span_id: str | None = None,
+    **extra: Any,
 ) -> dict[str, Any]:
     """Entry point for the PR analysis pipeline (Step 8 of §10.1)."""
+    active_trace_id = trace_id or get_trace_id()
+    active_span_id = span_id or get_span_id()
+    if active_trace_id:
+        set_trace_context(
+            trace_id=active_trace_id,
+            span_id=active_span_id,
+            repository=repository_full_name,
+            pr_number=pull_request_number,
+            head_sha=head_sha,
+            analysis_run_id=analysis_run_id,
+        )
+
     logger.info(
         "orchestrate_pr_analysis started: %s#%d @ %s (run=%s)",
         repository_full_name,
@@ -301,11 +317,13 @@ def orchestrate_pr_analysis(
         "pr_author": pr_author,
         "webhook_received_at": webhook_received_at,
         "analysis_run_id": analysis_run_id,
+        "trace_id": active_trace_id,
+        "span_id": active_span_id,
     }
 
     try:
         workflow = chain(fetch_pr_diff.s(payload), preprocess_and_chunk.s())
-        workflow.apply_async()
+        workflow.apply_async(headers={"trace_id": active_trace_id, "span_id": active_span_id})
     except Exception as exc:
         logger.error("Failed to dispatch workflow chain for %s: %s", analysis_run_id, exc)
         record_terminal_failure(analysis_run_id, error_message=str(exc))
@@ -500,11 +518,17 @@ def preprocess_and_chunk(self: Any, data: dict[str, Any]) -> dict[str, Any]:
     diff_ref = f"diff:{analysis_run_id}"
     save_payload_ref(diff_ref, result.unified_diff, ttl=settings.diff_cache_ttl)
 
+    active_trace_id = context.get("trace_id") or get_trace_id()
+    active_span_id = context.get("span_id") or get_span_id()
+    task_headers = {"trace_id": active_trace_id, "span_id": active_span_id}
+
     # Build parallel group header for chord
     CHUNKS_PER_ANALYSIS.observe(len(result.chunks))
     header = []
     for chunk in result.chunks:
-        header.append(analyze_ast_task.s(chunk.to_dict()))
+        chunk_dict = chunk.to_dict()
+        chunk_dict["trace_id"] = active_trace_id
+        header.append(analyze_ast_task.s(chunk_dict).set(headers=task_headers))
 
     for batch in result.llm_batches:
         header.append(
@@ -513,7 +537,7 @@ def preprocess_and_chunk(self: Any, data: dict[str, Any]) -> dict[str, Any]:
                 repo_full_name,
                 batch[0].language,
                 analysis_run_id,
-            )
+            ).set(headers=task_headers)
         )
 
     # Body is 3-task chain: aggregate_findings -> post_review_to_github -> persist_results
@@ -523,9 +547,9 @@ def preprocess_and_chunk(self: Any, data: dict[str, Any]) -> dict[str, Any]:
             diff_ref=diff_ref,
             files_analyzed=result.files_analyzed,
             chunks_total=len(result.chunks),
-        )
-        | post_review_to_github.s()
-        | persist_results.s()
+        ).set(headers=task_headers)
+        | post_review_to_github.s().set(headers=task_headers)
+        | persist_results.s().set(headers=task_headers)
     )
 
     chord(header)(body_chain)

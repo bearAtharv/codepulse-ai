@@ -57,6 +57,7 @@ services:
       GITHUB_WEBHOOK_SECRET: "dev_webhook_secret_not_for_production"
       ADMIN_API_KEY: "dev_admin_key_not_for_production"
       ENVIRONMENT: "development"
+      SERVICE_NAME: "codepulse-web"
       METRICS_PORT: "9090"
       MOCK_GITHUB: "true"
       MOCK_LLM: "true"
@@ -86,6 +87,7 @@ services:
       GITHUB_WEBHOOK_SECRET: "dev_webhook_secret_not_for_production"
       ADMIN_API_KEY: "dev_admin_key_not_for_production"
       ENVIRONMENT: "development"
+      SERVICE_NAME: "codepulse-worker"
       WORKER_METRICS_PORT: "9091"
       PROMETHEUS_MULTIPROC_DIR: "/tmp/prometheus_multiproc"
       MOCK_GITHUB: "true"
@@ -120,6 +122,7 @@ services:
       GITHUB_WEBHOOK_SECRET: "dev_webhook_secret_not_for_production"
       ADMIN_API_KEY: "dev_admin_key_not_for_production"
       ENVIRONMENT: "development"
+      SERVICE_NAME: "codepulse-beat"
       MOCK_GITHUB: "true"
       MOCK_LLM: "true"
       MOCK_LLM_FAILURE: "${MOCK_LLM_FAILURE:-false}"
@@ -169,9 +172,36 @@ services:
       - grafana_data:/var/lib/grafana
     depends_on:
       - prometheus
+      - loki
+
+  loki:
+    image: grafana/loki:3.1.1
+    user: "0:0"
+    ports:
+      - "127.0.0.1:3100:3100"
+    volumes:
+      - ./deploy/loki/loki-config.yml:/etc/loki/local-config.yaml:ro
+      - loki_data:/tmp/loki
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+
+  alloy:
+    image: grafana/alloy:v1.4.2
+    volumes:
+      - ./deploy/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy_data:/var/lib/alloy/data
+    command:
+      - "run"
+      - "--server.http.listen-addr=0.0.0.0:12345"
+      - "--storage.path=/var/lib/alloy/data"
+      - "/etc/alloy/config.alloy"
+    depends_on:
+      - loki
 
 volumes:
   postgres_data:
   redis_data:
   prometheus_data:
   grafana_data:
+  loki_data:
+  alloy_data:

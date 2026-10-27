@@ -462,4 +462,53 @@ Reviewing these requirements against production realities and upstream ecosystem
 4. **Configurable Dynamic Label Cardinality Bounding:**
    - `LabelLimiter` supports runtime configuration via `METRIC_LABEL_CAP` (defaulting to 200). High-cardinality candidate labels (`repository`, `installation_id`, `endpoint`) map values exceeding the cap to `"other"`.
 
+---
+
+## DEC-018: Structured Logging, Distributed Trace IDs, Loki, and Alloy Pipeline
+
+**Context:** Phase 8a-ii requires unified structured JSON logging, W3C distributed tracing context propagation from webhook receipt through all Celery tasks, automated secret/code redaction, and log aggregation via Grafana Loki and Grafana Alloy.
+
+**Decisions & Specifications:**
+
+1. **W3C Distributed Tracing Context (§9.3):**
+   - Trace IDs are formatted as 16-byte (32-character lowercase hex) W3C Trace Context identifiers; Span IDs are 8-byte (16-character hex).
+   - In FastAPI (`codepulse-web`), an HTTP middleware inspects incoming `traceparent` or `X-Trace-Id` headers (or generates a fresh trace ID), binds it to Python `contextvars`, and returns `X-Trace-Id` on all HTTP responses.
+   - Trace and span context is passed into Celery `task_headers` and task payload kwargs when dispatching pipelines from webhooks.
+   - Celery worker hooks into `task_prerun` and `task_postrun` signals to automatically bind the task's `trace_id`, child `span_id`, `task_id`, `task_name`, `analysis_run_id`, `repository`, `pr_number`, and `head_sha` to the active thread/task context.
+
+2. **Structured JSON Logging Schema (§9.4):**
+   - Log formatter (`JSONLogFormatter`) emits single-line JSON with 10 mandatory fields:
+     - `timestamp`: ISO-8601 UTC timestamp (`YYYY-MM-DDTHH:MM:SS.ffffff+00:00`).
+     - `level`: Python log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`).
+     - `service`: Service identifier (`codepulse-web`, `codepulse-worker`, `codepulse-beat`).
+     - `logger`: Originating logger name.
+     - `message`: Sanitized log message text.
+     - `trace_id`: 32-character hex trace ID or null when unassociated.
+     - `span_id`: 16-character hex span ID or null.
+     - `analysis_run_id`: UUID string or null.
+     - `repository`: Full repository name (`owner/repo`) or null.
+     - `pr_number`: Pull request integer number or null.
+     - `task_name`: Celery task name or null.
+     - `task_id`: Celery task UUID or null.
+     - `head_sha`: Full 40-character commit SHA or null.
+     - `exception`: Full traceback when `exc_info` is recorded.
+
+3. **Log Sanitization & Secret Redaction Filter (§9.4):**
+   - `SecretAndCodeSanitizer` logging filter inspects all log records and arguments in place prior to formatting.
+   - Automated redaction patterns mask:
+     - Gemini / Google API keys (`AIza...`) -> `[REDACTED_GEMINI_KEY]`
+     - GitHub Personal Access Tokens (`ghp_...`, `github_pat_...`) -> `[REDACTED_GITHUB_TOKEN]`, `[REDACTED_GITHUB_PAT]`
+     - HTTP Authorization Bearer tokens -> `Bearer [REDACTED_BEARER_TOKEN]`
+     - JWT tokens -> `[REDACTED_JWT]`
+     - Passwords in database connection strings (`postgresql://...`) -> `://user:[REDACTED_PASSWORD]@...`
+     - Private keys -> `[REDACTED_PRIVATE_KEY]`
+     - Raw unified diff patches and diff hunks (`diff --git`, `@@ -... @@`) -> `[REDACTED_DIFF]`, `[REDACTED_DIFF_HUNK]`
+   - Customer source code fragments and full diffs are strictly prohibited from appearing in application logs.
+
+4. **Loki and Grafana Alloy Telemetry Pipeline:**
+   - **Loki (`3.1.1`):** Deployed in single-binary mode with TSDB v13 schema and filesystem chunk storage on isolated port `127.0.0.1:3100:3100`.
+   - **Grafana Alloy (`v1.4.2`):** Modern replacement for Promtail running as a Docker daemon collector. Mounts `/var/run/docker.sock` in read-only mode to discover `codepulse-*` containers, parses JSON logs via pipeline stages, extracts labels (`service`, `level`, `trace_id`), and forwards batches to Loki.
+   - **Grafana Provisioning:** Loki datasource (`uid: LOKI_DEFAULT`) and `Application Logs` dashboard (`uid: application-logs`) provisioned automatically with log volume time-series and live streaming logs panel.
+
+
 

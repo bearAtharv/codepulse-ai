@@ -102,3 +102,94 @@ def on_worker_ready(**kwargs: Any) -> None:
     except Exception as exc:
         logging.getLogger(__name__).warning("Could not start worker metrics server on port %d: %s", port, exc)
 
+
+# ── Structured Logging & Trace Context Propagation (§9.3, §9.4, DEC-018) ─────
+from celery.signals import setup_logging, task_prerun, task_postrun
+from codepulse.observability import (
+    configure_logging,
+    generate_span_id,
+    generate_trace_id,
+    set_trace_context,
+    clear_trace_context,
+)
+
+
+@setup_logging.connect
+def on_setup_logging(**kwargs: Any) -> None:
+    """Configure Celery worker to use structured JSON logging."""
+    service_name = os.environ.get("SERVICE_NAME", "codepulse-worker")
+    configure_logging(service_name=service_name)
+
+
+@task_prerun.connect
+def on_task_prerun(
+    sender: Any = None,
+    task_id: str | None = None,
+    task: Any = None,
+    args: tuple | None = None,
+    kwargs: dict | None = None,
+    **extra: Any,
+) -> None:
+    """Extract and establish trace context for executing Celery task."""
+    headers = getattr(task.request, "headers", {}) or {}
+    trace_id = headers.get("trace_id")
+    span_id = headers.get("span_id") or generate_span_id()
+
+    # Fallback to kwargs or args inspection
+    if not trace_id and kwargs:
+        trace_id = kwargs.get("trace_id")
+        if not trace_id and "payload" in kwargs and isinstance(kwargs["payload"], dict):
+            trace_id = kwargs["payload"].get("trace_id")
+        if not trace_id and "context" in kwargs and isinstance(kwargs["context"], dict):
+            trace_id = kwargs["context"].get("trace_id")
+    if not trace_id and args:
+        for arg in args:
+            if isinstance(arg, dict):
+                trace_id = arg.get("trace_id")
+                if not trace_id and isinstance(arg.get("context"), dict):
+                    trace_id = arg["context"].get("trace_id")
+                if trace_id:
+                    break
+
+    trace_id = trace_id or generate_trace_id()
+
+    # Extract metadata
+    repo = None
+    pr = None
+    sha = None
+    run_id = None
+    if kwargs:
+        repo = kwargs.get("repository_full_name")
+        pr = kwargs.get("pull_request_number")
+        sha = kwargs.get("head_sha")
+        run_id = kwargs.get("analysis_run_id")
+    if args and isinstance(args[0], dict):
+        d = args[0]
+        ctx = d.get("context") if isinstance(d.get("context"), dict) else d
+        repo = repo or ctx.get("repository_full_name")
+        pr = pr or ctx.get("pull_request_number")
+        sha = sha or ctx.get("head_sha")
+        run_id = run_id or ctx.get("analysis_run_id")
+
+    task_name = getattr(task, "name", str(sender))
+    service_name = os.environ.get("SERVICE_NAME", "codepulse-worker")
+
+    set_trace_context(
+        trace_id=trace_id,
+        span_id=span_id,
+        task_id=task_id,
+        task_name=task_name,
+        repository=repo,
+        pr_number=int(pr) if pr is not None else None,
+        head_sha=sha,
+        analysis_run_id=str(run_id) if run_id else None,
+        service=service_name,
+    )
+
+
+@task_postrun.connect
+def on_task_postrun(sender: Any = None, task_id: str | None = None, task: Any = None, **extra: Any) -> None:
+    """Clear trace context after task execution."""
+    clear_trace_context()
+
+

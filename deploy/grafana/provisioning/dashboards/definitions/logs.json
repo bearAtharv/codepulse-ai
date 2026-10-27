@@ -1,0 +1,94 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": true,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "title": "Log Volume by Service",
+      "type": "timeseries",
+      "datasource": {
+        "type": "loki",
+        "uid": "LOKI_DEFAULT"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "LOKI_DEFAULT"
+          },
+          "editorMode": "code",
+          "expr": "sum by (service) (count_over_time({service=~\".+\"}[1m]))",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 16,
+        "w": 24,
+        "x": 0,
+        "y": 8
+      },
+      "id": 2,
+      "title": "Live Structured Log Stream",
+      "type": "logs",
+      "datasource": {
+        "type": "loki",
+        "uid": "LOKI_DEFAULT"
+      },
+      "options": {
+        "showLabels": true,
+        "wrapLogMessage": true,
+        "enableLogDetails": true,
+        "sortOrder": "Descending"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "LOKI_DEFAULT"
+          },
+          "editorMode": "code",
+          "expr": "{service=~\".+\"}",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 39,
+  "tags": [
+    "codepulse",
+    "logs",
+    "observability"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "utc",
+  "title": "Application Logs",
+  "uid": "application-logs",
+  "version": 1
+}

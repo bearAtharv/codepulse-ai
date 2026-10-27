@@ -2,7 +2,27 @@
 
 All notable changes to CodePulse AI are documented here.
 
-## [Unreleased] — Phase 8a-i: Metrics, Prometheus, and Grafana Dashboards
+## [Unreleased] — Phase 8a-ii: Structured Logging, Trace IDs, Loki, and Alloy
+
+### Added
+- **Distributed Tracing & W3C Trace Context (§9.3, DEC-018)** (`src/codepulse/observability/tracing.py`):
+  - 16-byte (32 lowercase hex characters) trace ID and 8-byte (16 lowercase hex characters) span ID generation conforming to W3C Trace Context specification.
+  - HTTP middleware in `codepulse-web` extracting incoming `traceparent` or `X-Trace-Id` headers (or generating new trace IDs), binding to `contextvars`, and attaching `X-Trace-Id` to all responses.
+  - Dual trace propagation into Celery pipeline via task headers (`trace_id`, `span_id`) and task payload context.
+  - Celery `task_prerun` and `task_postrun` signal handlers propagating trace metadata across all pipeline tasks (`orchestrate_pr_analysis`, `fetch_pr_diff`, `preprocess_and_chunk`, `analyze_ast`, `analyze_llm`, `aggregate_findings`, `post_review_to_github`, `persist_results`).
+- **Structured JSON Logging Schema (§9.4, DEC-018)** (`src/codepulse/observability/formatter.py`, `setup.py`):
+  - `JSONLogFormatter` generating one-line JSON containing all mandatory fields: `timestamp`, `level`, `service`, `logger`, `message`, `trace_id`, `span_id`, `analysis_run_id`, `repository`, `pr_number`, `task_name`, `task_id`, `head_sha`, and `exception`.
+  - Configured across FastAPI uvicorn loggers, Celery worker loggers, and Celery beat loggers with service name tagging (`codepulse-web`, `codepulse-worker`, `codepulse-beat`).
+- **Log Sanitization & Secret Redaction Filter (§9.4, DEC-018)** (`src/codepulse/observability/redaction.py`):
+  - `SecretAndCodeSanitizer` logging filter automatically intercepting log records to redact Gemini API keys (`AIza...`), GitHub classic & fine-grained PATs (`ghp_...`, `github_pat_...`), HTTP Bearer tokens, JWTs, database connection string passwords, private keys, and unified diff patches (`diff --git`, `@@ -... @@`).
+  - Prohibits customer source code and raw diff chunks from appearing in logs.
+- **Loki & Grafana Alloy Telemetry Pipeline** (`deploy/loki/`, `deploy/alloy/`, `docker-compose.yml`):
+  - Grafana Loki 3.1.1 configured with single-binary TSDB v13 schema and filesystem chunk storage.
+  - Grafana Alloy v1.4.2 collector discovering local Docker containers via `/var/run/docker.sock`, parsing JSON log entries, extracting structured labels (`service`, `level`, `trace_id`), and shipping batches to Loki.
+  - Provisioned Grafana Loki datasource (`LOKI_DEFAULT`) and `Application Logs` dashboard (`application-logs`).
+- **15 unit & integration tests** (`tests/test_logging.py`). Total test suite: **363 tests**.
+
+## [Phase 8a-i] — Metrics, Prometheus, and Grafana Dashboards
 
 ### Added
 - **Metric Security, Cardinality, & Naming Hardening (DEC-017)**:
