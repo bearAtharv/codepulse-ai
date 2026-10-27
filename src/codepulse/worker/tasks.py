@@ -183,6 +183,14 @@ def record_terminal_failure(
         logger.error("Failed to update terminal status for %s: %s", analysis_run_id, exc)
 
 
+def normalize_confidence(val: Any) -> str:
+    """Normalize confidence to canonical DB values ('high', 'medium', 'low') per §3.7.1."""
+    if isinstance(val, (int, float)):
+        return "high" if val >= 0.8 else ("medium" if val >= 0.5 else "low")
+    s = str(val).lower() if val else "medium"
+    return s if s in ("high", "medium", "low") else "medium"
+
+
 def recover_pending_persistence(redis_client: Any, db: Any) -> int:
     """Recover and persist findings saved to Redis when PostgreSQL was unreachable (Branch G)."""
     recovered = 0
@@ -196,8 +204,7 @@ def recover_pending_persistence(redis_client: Any, db: Any) -> int:
             continue
         findings = [Finding.from_dict(f) for f in payload.get("findings", [])]
         for f in findings:
-            if not isinstance(f.confidence, str):
-                f.confidence = str(f.confidence)
+            f.confidence = normalize_confidence(f.confidence)
         posted_at = (
             datetime.fromisoformat(payload["review_posted_at"])
             if payload.get("review_posted_at")
@@ -566,11 +573,12 @@ def analyze_llm_task(
     repo_name: str,
     language: str,
     analysis_run_id: str,
+    *,
+    failure_retries: int = 0,
 ) -> dict[str, Any]:
     """Execute LLM semantic reasoning on a batch of diff chunks (Step 13 of §10.1)."""
     diff_chunks = [AnalysisChunk.from_dict(d).to_diff_chunk() for d in chunks_data]
     is_direct = getattr(self.request, "called_directly", False)
-    retries = getattr(self.request, "retries", 0)
     settings = get_settings()
     model_id = settings.gemini_model
 
@@ -620,7 +628,11 @@ def analyze_llm_task(
             analysis_run_id,
             retry_delay,
         )
-        raise self.retry(countdown=retry_delay)
+        raise self.retry(
+            countdown=retry_delay,
+            max_retries=None,
+            kwargs={"failure_retries": failure_retries},
+        )
 
     # 3. Circuit Breaker (§6.3, §10.2 Branch D)
     breaker = CircuitBreaker(redis_client, name="gemini")
@@ -659,16 +671,21 @@ def analyze_llm_task(
         raise
     except Exception as exc:
         breaker.record_failure()
-        if not is_direct and retries < 3:
-            delay = get_retry_delay(ANALYZE_LLM_BACKOFF, retries)
+        if not is_direct and failure_retries < 3:
+            delay = get_retry_delay(ANALYZE_LLM_BACKOFF, failure_retries)
             logger.warning(
                 "analyze_llm failed (attempt %d/3) for run %s (%s). Retrying in %ds...",
-                retries + 1,
+                failure_retries + 1,
                 analysis_run_id,
                 language,
                 delay,
             )
-            raise self.retry(exc=exc, countdown=delay)
+            raise self.retry(
+                exc=exc,
+                countdown=delay,
+                max_retries=None,
+                kwargs={"failure_retries": failure_retries + 1},
+            )
         else:
             logger.error(
                 "analyze_llm retries exhausted for run %s (%s): %s. Proceeding in degraded mode.",
@@ -681,7 +698,7 @@ def analyze_llm_task(
                 task_id=getattr(self.request, "id", None) or str(uuid.uuid4()),
                 task_args={"analysis_run_id": analysis_run_id, "language": language},
                 exc=exc,
-                retry_count=retries,
+                retry_count=failure_retries,
             )
             # Catch failure and return degraded result so chord body still runs
             return {

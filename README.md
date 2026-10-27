@@ -417,6 +417,12 @@ tests/
 
 ---
 
+## Known Limitations
+
+- **Cross-Source Line-Number Offsets**: Deduplication and collision merging between AST heuristics and LLM semantic findings rely on exact line matching (`file_path`, `line_start`, `category`, and matching vulnerability family). In practice, LLM analysis may report a finding offset by one or two lines relative to AST-derived findings for the same vulnerability block. When lines do not match exactly, AST and LLM findings are posted as distinct comments rather than merged into a single attributed finding. A fuzzy line window was rejected to avoid false-positive merges across adjacent, distinct statements.
+
+---
+
 ## Design Decisions
 
 See [DECISIONS.md](DECISIONS.md) for a log of all architecture decisions, especially where the implementation diverges from or clarifies the architecture document.

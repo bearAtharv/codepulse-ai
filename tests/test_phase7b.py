@@ -145,6 +145,40 @@ class TestTokenBucketRateLimiter:
             # Must raise a Celery Retry exception
             assert "Retry" in type(exc_info.value).__name__ or "retry" in str(exc_info.value).lower()
 
+    def test_rate_limit_does_not_consume_failure_budget_or_trip_breaker(self) -> None:
+        """Rate limit retry must NOT increment failure_retries and must NOT count as a circuit breaker failure."""
+        chunk = make_chunk_dict()
+        redis_client = get_redis_client()
+        breaker = CircuitBreaker(redis_client, name="gemini")
+        breaker.reset()
+
+        with patch.dict(os.environ, {"MOCK_LLM": "true", "MOCK_RATE_LIMIT": "true", "MOCK_RATE_LIMIT_WAIT": "2"}):
+            with pytest.raises(Exception):
+                analyze_llm_task([chunk], "org/repo", "python", str(uuid.uuid4()), failure_retries=0)
+
+        # 1. Breaker state must still be CLOSED with 0 recorded failures
+        assert breaker.get_state() == "CLOSED"
+        assert redis_client.get(breaker.failures_key) is None
+
+    def test_rate_limit_retry_preserves_full_failure_budget(self) -> None:
+        """A run that experiences rate limiting still retains its full 3-attempt failure retry budget."""
+        chunk = make_chunk_dict()
+        run_id = str(uuid.uuid4())
+
+        # When an actual failure occurs, failure_retries=0 retries (attempt 1/3) with backoff, NOT degraded
+        with patch.object(analyze_llm_task, "retry", side_effect=RuntimeError("ScheduledRetry")) as mock_retry:
+            with patch.object(analyze_llm_task.request, "called_directly", False, create=True):
+                with patch.dict(os.environ, {"MOCK_LLM": "true"}), patch(
+                    "codepulse.worker.tasks.analyze_llm", side_effect=RuntimeError("API error")
+                ):
+                    with pytest.raises(RuntimeError) as exc_info:
+                        analyze_llm_task([chunk], "org/repo", "python", run_id, failure_retries=0)
+                    assert "ScheduledRetry" in str(exc_info.value)
+                    mock_retry.assert_called_once()
+                    call_kwargs = mock_retry.call_args[1]
+                    # Failure count must increment to 1, preserving remaining budget
+                    assert call_kwargs["kwargs"]["failure_retries"] == 1
+
 
 # ── 2. LLM Response Cache Tests ────────────────────────────────────────
 
@@ -371,6 +405,52 @@ class TestReanalysisBeatTask:
         # Flag was cleared because PR head SHA moved (superseded)
         assert reloaded_run.reanalysis_needed is False
 
+    def test_reanalysis_skips_when_run_is_locked(
+        self, db_session: Session, test_repo_and_run: tuple[Repository, AnalysisRun]
+    ) -> None:
+        """When another worker holds the Redis lock for a run, re-analysis must skip it."""
+        repo, run = test_repo_and_run
+        run.reanalysis_needed = True
+        db_session.commit()
+
+        redis_client = get_redis_client()
+        lock_key = f"lock:reanalyze:{run.id}"
+        redis_client.set(lock_key, "1", ex=60)
+
+        try:
+            count = scan_reanalysis_needed()
+            # Skipped because locked
+            assert count == 0
+            db_session.expire_all()
+            reloaded_run = db_session.get(AnalysisRun, run.id)
+            assert reloaded_run is not None
+            assert reloaded_run.reanalysis_needed is True
+        finally:
+            redis_client.delete(lock_key)
+
+    def test_reanalysis_attempt_cap_clears_flag(
+        self, db_session: Session, test_repo_and_run: tuple[Repository, AnalysisRun]
+    ) -> None:
+        """When attempt count exceeds 3, reanalysis_needed must be cleared with an error message."""
+        repo, run = test_repo_and_run
+        run.reanalysis_needed = True
+        db_session.commit()
+
+        redis_client = get_redis_client()
+        attempt_key = f"reanalyze:attempts:{run.id}"
+        redis_client.set(attempt_key, "3")
+
+        try:
+            scan_reanalysis_needed()
+            db_session.expire_all()
+            reloaded_run = db_session.get(AnalysisRun, run.id)
+            assert reloaded_run is not None
+            # Flag cleared and error message recorded
+            assert reloaded_run.reanalysis_needed is False
+            assert "attempts exhausted (cap: 3)" in (reloaded_run.error_message or "")
+        finally:
+            redis_client.delete(attempt_key)
+
 
 # ── 7. Persistence Drain Beat Task Tests ───────────────────────────────
 
@@ -381,3 +461,67 @@ class TestPersistenceDrainBeatTask:
     def test_drain_pending_persistence_task_empty(self) -> None:
         recovered = drain_pending_persistence_task()
         assert isinstance(recovered, int)
+
+    def test_drain_pending_persistence_commits_to_database_and_normalizes_confidence(
+        self, db_session: Session, test_repo_and_run: tuple[Repository, AnalysisRun]
+    ) -> None:
+        """Verifies drain_pending_persistence_task commits to DB and handles non-string confidence."""
+        repo, run = test_repo_and_run
+        run.status = "running"
+        db_session.commit()
+
+        redis_client = get_redis_client()
+        payload = {
+            "analysis_run_id": str(run.id),
+            "status": "completed",
+            "files_analyzed": 1,
+            "chunks_total": 1,
+            "chunks_completed": 1,
+            "analysis_duration_ms": 100,
+            "github_review_id": 987654321,
+            "review_posted_at": "2026-10-27T08:00:00+00:00",
+            "findings": [
+                {
+                    "file_path": "src/app.py",
+                    "line_start": 10,
+                    "line_end": 10,
+                    "severity": "critical",
+                    "category": "A01",
+                    "title": "Recovered Vulnerability",
+                    "explanation": "Persisted from pending queue",
+                    "remediation": "Sanitize inputs",
+                    "confidence": 0.99,  # Float: must be normalized to string
+                    "source": "ast",
+                    "rule_id": "test-rule",
+                    "raw_category": "A01",
+                    "suggested_fix": None,
+                    "diff_line": 10,
+                    "diff_start_line": None,
+                    "diff_side": "RIGHT",
+                    "is_in_diff": True,
+                }
+            ],
+            "llm_usages": [],
+        }
+
+        import json
+        redis_client.set(f"dead_letter:persist:{run.id}", json.dumps(payload), ex=3600)
+        redis_client.rpush("codepulse:pending_persistence", str(run.id))
+
+        try:
+            recovered = drain_pending_persistence_task()
+            assert recovered >= 1
+
+            db_session.expire_all()
+            reloaded_run = db_session.get(AnalysisRun, run.id)
+            assert reloaded_run is not None
+            assert reloaded_run.status == "completed"
+            assert reloaded_run.github_review_id == 987654321
+
+            findings = db_session.query(DBFinding).filter(DBFinding.analysis_run_id == run.id).all()
+            assert len(findings) == 1
+            assert findings[0].title == "Recovered Vulnerability"
+            assert isinstance(findings[0].confidence, str)
+            assert findings[0].confidence == "high"
+        finally:
+            redis_client.delete(f"dead_letter:persist:{run.id}")

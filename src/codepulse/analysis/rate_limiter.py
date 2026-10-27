@@ -76,6 +76,12 @@ class TokenBucketRateLimiter:
         if rpm is None:
             env_rpm = os.environ.get("GEMINI_RPM_LIMIT")
             rpm = float(env_rpm) if env_rpm else float(DEFAULT_RPM)
+        if burst == DEFAULT_BURST:
+            env_burst = os.environ.get("GEMINI_BURST_LIMIT")
+            if env_burst:
+                burst = int(env_burst)
+            elif rpm < DEFAULT_BURST:
+                burst = max(1, int(rpm))
         self.rpm = rpm
         self.refill_rate = self.rpm / 60.0  # tokens per second
         self.burst = burst
