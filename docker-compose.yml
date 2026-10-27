@@ -185,7 +185,7 @@ services:
     command: ["-config.file=/etc/loki/local-config.yaml"]
 
   alloy:
-    image: grafana/alloy:v1.4.2
+    image: grafana/alloy:v1.21.2
     volumes:
       - ./deploy/alloy/config.alloy:/etc/alloy/config.alloy:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
