@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from typing import Final
 
 from prometheus_client import (
@@ -235,6 +236,17 @@ def record_finding(severity: str, category: str, source: str) -> None:
     ).inc()
 
 
+def record_analysis_phase_duration(phase: str, duration_seconds: float, repository: str | None = None) -> None:
+    """Record per-phase latency distribution (§9.2)."""
+    bounded_repo = bound_repository(repository)
+    ANALYSIS_DURATION_SECONDS.labels(phase=phase, repository=bounded_repo).observe(duration_seconds)
+
+
+_cache_hits = 0
+_cache_total = 0
+_cache_lock = threading.Lock()
+
+
 def record_llm_telemetry(
     model: str,
     input_tokens: int,
@@ -243,6 +255,7 @@ def record_llm_telemetry(
     cache_hit: bool,
 ) -> None:
     """Record LLM inference telemetry."""
+    global _cache_hits, _cache_total
     cache_str = "true" if cache_hit else "false"
     latency_sec = latency_ms / 1000.0 if latency_ms else 0.0
 
@@ -255,6 +268,13 @@ def record_llm_telemetry(
     # Cost calculation: Gemini 3.7 Flash pricing ($0.075 / 1M input tokens, $0.30 / 1M output tokens)
     cost_cents = (input_tokens * 0.000075 + output_tokens * 0.00030) * 100
     LLM_COST_CENTS_TOTAL.labels(model=model).inc(cost_cents)
+
+    with _cache_lock:
+        _cache_total += 1
+        if cache_hit:
+            _cache_hits += 1
+        ratio = _cache_hits / _cache_total if _cache_total > 0 else 0.0
+        LLM_CACHE_HIT_RATIO.set(ratio)
 
 
 def record_circuit_breaker(api: str, state_value: float) -> None:

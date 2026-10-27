@@ -2,4 +2,4 @@ groups:
   - name: codepulse_rules
     rules:
       - record: codepulse_analysis_latency_p99
-        expr: histogram_quantile(0.99, sum(rate(codepulse_pipeline_duration_seconds_bucket[5m])) by (le))
+        expr: histogram_quantile(0.99, sum(rate(codepulse_end_to_end_duration_seconds_bucket[5m])) by (le))

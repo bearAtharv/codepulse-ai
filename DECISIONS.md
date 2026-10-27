@@ -431,3 +431,35 @@ Reviewing these requirements against production realities and upstream ecosystem
    - **Reason:** Celery Beat has no native leader election protocol. Running multiple Beat replicas concurrently results in duplicated scheduled task dispatches (`scan_reanalysis_needed`, `drain_pending_persistence_task`), triggering redundant pipeline runs and API collisions.
    - **Architecture:** Deploy Celery Beat with exactly 1 replica and `strategy: Recreate` in Kubernetes deployment manifests. This guarantees at-most-one active scheduler while Kubernetes handles automatic pod restarts upon node failure.
 
+---
+
+## DEC-017: Observability Version Pinning, Metric Naming Alignment, and Security Hardening
+
+**Context:** Following Phase 8a-i, audit findings required evaluating upstream component releases, aligning metric names with the literal §9.2 table, hardening Grafana authentication, and securing internal metrics exposition.
+
+**Decisions & Specifications:**
+
+1. **Version Pinning Justification vs Upstream Releases (October 2026 Audit):**
+   - **Prometheus (`v2.54.1`):** While Prometheus v3.x is available upstream (`v3.15.1`), v2.54.1 is the LTS bridge release. v3.x introduced breaking configuration syntax changes and experimental UTF-8 metric naming models. Pinning `v2.54.1` guarantees compatibility with standard PromQL recording rules, Alertmanager templates, and multi-version client libraries without configuration churn.
+   - **Grafana (`11.2.0`):** While newer Grafana releases (12.x/13.x) exist, Grafana 11.2.0 is the stable LTS line supporting standard schemaVersion 39 dashboard provisioning without Angular migration deprecations or breaking changes to provisioning APIs.
+   - **Loki (`3.1.1`):** Supported single-binary local-filesystem storage engine, crucial for standalone local Docker Compose development where distributed S3/GCS object stores are unavailable.
+   - **Tempo (`2.6.0`):** Operates cleanly on local filesystem block storage without cloud blob store dependencies.
+   - **Grafana Alloy (`v1.4.2`):** Official modern telemetry collector replacing deprecated Promtail, maintaining stable pipeline syntax across Linux and container environments.
+   - **Redis (`7.2.6-alpine`):** Pinned to the Redis 7.2 LTS branch under the open-source BSD-3 license (prior to Redis 7.4 licensing changes), ensuring full compatibility with Celery Kombu Lua scripting.
+   - **PostgreSQL (`16.4-alpine`):** Matches production cloud managed Postgres versions (GCP Cloud SQL / AWS RDS default v16) with proven asyncpg and SQLAlchemy connection pooling stability.
+
+2. **Metric Naming Alignment with Section 9.2 (§9.2):**
+   - The p99 recording rule `codepulse_analysis_latency_p99` (§4.4) is evaluated directly over `codepulse_end_to_end_duration_seconds_bucket` (the §9.2 canonical metric for webhook-to-posted-review latency).
+   - Per-phase durations (`fetch`, `ast`, `llm`, `aggregate`, `post`) are emitted to `codepulse_analysis_duration_seconds` with `phase` and `repository` dimensions per §9.2.
+   - All 13 canonical application metrics from §9.2 are strictly implemented, verified, and emitted across application services.
+
+3. **Grafana Security & Port Hardening:**
+   - Default credentials (`admin:admin`) are eliminated. Grafana requires `GRAFANA_ADMIN_PASSWORD` from the environment; no fallback password is committed.
+   - Anonymous access is disabled (`GF_AUTH_ANONYMOUS_ENABLED=false`).
+   - Web (`9090`) and Worker (`9091`) metrics ports are removed from host interface publishing and restricted entirely to the internal Compose bridge network, reachable only by Prometheus.
+   - Prometheus (`127.0.0.1:9092:9090`) and Grafana (`127.0.0.1:3000:3000`) port bindings are restricted to local loopback.
+
+4. **Configurable Dynamic Label Cardinality Bounding:**
+   - `LabelLimiter` supports runtime configuration via `METRIC_LABEL_CAP` (defaulting to 200). High-cardinality candidate labels (`repository`, `installation_id`, `endpoint`) map values exceeding the cap to `"other"`.
+
+

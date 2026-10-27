@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from typing import Final
 
@@ -32,18 +33,35 @@ DEFAULT_MAX_CARDINALITY: Final[int] = 200
 FALLBACK_LABEL_VALUE: Final[str] = "other"
 
 
+def get_configured_label_cap(default: int = DEFAULT_MAX_CARDINALITY) -> int:
+    """Return maximum label cardinality cap from environment or default."""
+    env_cap = os.environ.get("METRIC_LABEL_CAP")
+    if env_cap:
+        try:
+            return max(1, int(env_cap))
+        except ValueError:
+            pass
+    return default
+
+
 class LabelLimiter:
     """Enforces a maximum distinct value cap on a metric label to prevent cardinality explosion."""
 
     def __init__(
         self,
-        max_cardinality: int = DEFAULT_MAX_CARDINALITY,
+        max_cardinality: int | None = None,
         fallback: str = FALLBACK_LABEL_VALUE,
     ) -> None:
-        self.max_cardinality = max_cardinality
+        self._max_cardinality = max_cardinality
         self.fallback = fallback
         self._seen: set[str] = set()
         self._lock = threading.Lock()
+
+    @property
+    def max_cardinality(self) -> int:
+        if self._max_cardinality is not None:
+            return self._max_cardinality
+        return get_configured_label_cap(DEFAULT_MAX_CARDINALITY)
 
     def bound(self, value: str | None) -> str:
         """Return the label value if under cardinality cap, else return fallback ('other')."""
@@ -73,9 +91,9 @@ class LabelLimiter:
 
 
 # Global limiter instances for high-cardinality candidate dimensions
-_repository_limiter = LabelLimiter(max_cardinality=200)
-_endpoint_limiter = LabelLimiter(max_cardinality=200)
-_installation_limiter = LabelLimiter(max_cardinality=200)
+_repository_limiter = LabelLimiter()
+_endpoint_limiter = LabelLimiter()
+_installation_limiter = LabelLimiter()
 
 
 def bound_repository(repo: str | None) -> str:

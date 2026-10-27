@@ -5,6 +5,13 @@ All notable changes to CodePulse AI are documented here.
 ## [Unreleased] — Phase 8a-i: Metrics, Prometheus, and Grafana Dashboards
 
 ### Added
+- **Metric Security, Cardinality, & Naming Hardening (DEC-017)**:
+  - Version pinning rationale documented against upstream October 2026 releases (Prometheus v2.54.1 LTS, Grafana 11.2.0, Loki 3.1.1, Tempo 2.6.0, Alloy v1.4.2, Redis 7.2.6-alpine, PostgreSQL 16.4-alpine).
+  - Grafana security hardening: anonymous access disabled (`GF_AUTH_ANONYMOUS_ENABLED=false`), mandatory `GRAFANA_ADMIN_PASSWORD` via environment with template in `.env.example` and no committed default credentials.
+  - Complete port isolation: web (9090) and worker (9091) internal metrics ports removed from published host interfaces, accessible strictly over internal Docker bridge network by Prometheus.
+  - Aligned p99 recording rule `codepulse_analysis_latency_p99` to calculate over `codepulse_end_to_end_duration_seconds_bucket` per §9.2.
+  - Added per-phase latency recording to `codepulse_analysis_duration_seconds` for `fetch`, `ast`, `llm`, `aggregate`, and `post` phases.
+  - Added `METRIC_LABEL_CAP` environment configuration support for dynamic cardinality bounding.
 - **13 Canonical Prometheus Metrics (§9.2, DEC-016)** (`src/codepulse/metrics/registry.py`):
   - Counters, Gauges, and Histograms with exact names and label sets from §9.2:
     - `codepulse_webhooks_received_total` (`event_type`, `action`, `status`)

@@ -311,23 +311,23 @@ The `analysis_runs` table has a unique constraint on `(repository_id, pull_reque
 
 ### Phase 8a-i — Metrics, Prometheus, and Grafana Dashboards
 
-- **13 Canonical Prometheus Metrics (§9.2, DEC-016)** (`src/codepulse/metrics/registry.py`):
+- **13 Canonical Prometheus Metrics (§9.2, DEC-016, DEC-017)** (`src/codepulse/metrics/registry.py`):
   - Counters, Histograms, and Gauges tracking webhook intake, pipeline execution, chunk distribution, findings by severity/category/source, LLM token consumption/costs/latency, circuit breaker state, dead-letter entries, and GitHub API interactions.
-  - Latency p99 implemented via Prometheus recording rule `codepulse_analysis_latency_p99` over `codepulse_pipeline_duration_seconds`.
+  - Latency p99 implemented via Prometheus recording rule `codepulse_analysis_latency_p99` over `codepulse_end_to_end_duration_seconds`.
 - **Metric Label Cardinality & Security Boundary** (`src/codepulse/metrics/labels.py`):
-  - Strict 200 distinct-value cap (`LabelLimiter`) on dynamic label dimensions (`repository`, `endpoint`, `installation_id`), mapping overflow to `"other"` to prevent TSDB index exhaustion.
+  - Strict 200 distinct-value cap (`LabelLimiter`, configurable via `METRIC_LABEL_CAP`) on dynamic label dimensions (`repository`, `endpoint`, `installation_id`), mapping overflow to `"other"` to prevent TSDB index exhaustion.
   - Enforced security exclusion of unbounded or sensitive dimensions: file paths, PR numbers, delivery UUIDs, commit SHAs, rule titles, and source code fragments are strictly forbidden as labels.
 - **Dedicated Internal Exporters & Port Isolation**:
-  - Web metrics exposed on dedicated internal port `9090` (`http://localhost:9090/metrics`).
-  - Celery worker metrics aggregated across 4 prefork processes via `MultiProcessCollector` and `/tmp/prometheus_multiproc`, served on internal worker port `9091` (`http://localhost:9091/metrics`).
-  - Public application port `8000` strictly isolates metric endpoints, returning `404 Not Found` for `/metrics`.
+  - Web metrics exposed on dedicated internal port `9090` (`http://web:9090/metrics`).
+  - Celery worker metrics aggregated across 4 prefork processes via `MultiProcessCollector` and `/tmp/prometheus_multiproc`, served on internal worker port `9091` (`http://worker:9091/metrics`).
+  - Internal metrics ports 9090 and 9091 are isolated on the container network and not exposed on host interfaces. Public application port `8000` returns `404 Not Found` for `/metrics`.
 - **Automated Provisioning & Dashboards** (`docker-compose.yml`, `deploy/`):
-  - Prometheus (`prom/prometheus:v2.54.1`) on port `9092` (`http://localhost:9092`) scraping web and worker instances at 5s intervals.
-  - Grafana (`grafana/grafana:11.2.0`) on port `3000` (`http://localhost:3000`, `admin`/`admin`) with persistent volumes and 3 pre-provisioned dashboards:
+  - Prometheus (`prom/prometheus:v2.54.1`) on port `9092` (`http://127.0.0.1:9092`) scraping web and worker instances at 5s intervals.
+  - Grafana (`grafana/grafana:11.2.0`) on port `3000` (`http://127.0.0.1:3000`) authenticated via `GRAFANA_ADMIN_PASSWORD` (anonymous access disabled) with persistent volumes and 3 pre-provisioned dashboards:
     1. **Pipeline Health**: Webhook ingestion rates, active analysis runs, end-to-end duration, and p99 latency.
     2. **Findings & LLM**: Finding count by severity/source, token usage, cost estimates, and cache hit ratios.
     3. **Resilience**: Rate limiter delays, circuit breaker state, retry queues, and dead-letter log counters.
-- **12 unit tests** (`tests/test_metrics.py`). Total test suite: **346 tests**.
+- **14 unit tests** (`tests/test_metrics.py`). Total test suite: **348 tests**.
 
 ---
 

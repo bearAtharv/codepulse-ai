@@ -104,11 +104,21 @@ class TestMetricsRegistry:
         assert new_val == initial_val + 1
 
     def test_record_llm_telemetry_increments(self) -> None:
-        """Recording LLM telemetry tracks tokens, latency, and cost."""
+        """Recording LLM telemetry tracks tokens, latency, cost, and cache hit ratio."""
         init_tokens = LLM_TOKENS_CONSUMED.labels(model="gemini-3.7-flash", direction="input")._value.get()
-        record_llm_telemetry("gemini-3.7-flash", input_tokens=1000, output_tokens=200, latency_ms=450, cache_hit=False)
+        record_llm_telemetry("gemini-3.7-flash", input_tokens=1000, output_tokens=200, latency_ms=450, cache_hit=True)
         new_tokens = LLM_TOKENS_CONSUMED.labels(model="gemini-3.7-flash", direction="input")._value.get()
         assert new_tokens == init_tokens + 1000
+        assert LLM_CACHE_HIT_RATIO._value.get() >= 0.0
+
+    def test_record_analysis_phase_duration_records(self) -> None:
+        """Recording phase duration observes duration in histogram."""
+        from codepulse.metrics import ANALYSIS_DURATION_SECONDS, record_analysis_phase_duration
+
+        init_sum = ANALYSIS_DURATION_SECONDS.labels(phase="ast", repository="owner/test-repo")._sum.get()
+        record_analysis_phase_duration("ast", 0.05, "owner/test-repo")
+        new_sum = ANALYSIS_DURATION_SECONDS.labels(phase="ast", repository="owner/test-repo")._sum.get()
+        assert new_sum >= init_sum + 0.05
 
 
 class TestCardinalityBounding:
@@ -144,6 +154,27 @@ class TestCardinalityBounding:
         for i in range(200):
             bound_endpoint(f"/api/v1/resource-{i}")
         assert bound_endpoint("/api/v1/resource-overflow") == "other"
+
+    def test_env_configured_label_cap_bounds_repository_and_installation_id(self, monkeypatch: Any) -> None:
+        """Setting METRIC_LABEL_CAP restricts both repository and installation_id bounding."""
+        monkeypatch.setenv("METRIC_LABEL_CAP", "3")
+        from codepulse.metrics.labels import LabelLimiter
+
+        # Repo limiter test
+        repo_limiter = LabelLimiter()
+        assert repo_limiter.max_cardinality == 3
+        assert repo_limiter.bound("owner/repo-1") == "owner/repo-1"
+        assert repo_limiter.bound("owner/repo-2") == "owner/repo-2"
+        assert repo_limiter.bound("owner/repo-3") == "owner/repo-3"
+        assert repo_limiter.bound("owner/repo-4") == "other"
+
+        # Installation limiter test
+        inst_limiter = LabelLimiter()
+        assert inst_limiter.max_cardinality == 3
+        assert inst_limiter.bound("101") == "101"
+        assert inst_limiter.bound("102") == "102"
+        assert inst_limiter.bound("103") == "103"
+        assert inst_limiter.bound("104") == "other"
 
 
 class TestMetricsExpositionAndPortIsolation:

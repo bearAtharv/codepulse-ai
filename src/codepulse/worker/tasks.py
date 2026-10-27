@@ -70,11 +70,13 @@ from codepulse.ingestion.preprocessor import AnalysisChunk, preprocess_pr_files
 from codepulse.metrics import (
     CHUNKS_PER_ANALYSIS,
     RATE_LIMIT_WAIT_SECONDS,
+    record_analysis_phase_duration,
     record_analysis_run,
     record_circuit_breaker,
     record_dead_letter_metric,
     record_finding,
     record_github_api_call,
+    record_github_rate_limit,
     record_llm_telemetry,
     record_pipeline_duration,
 )
@@ -157,6 +159,7 @@ def record_dead_letter(
             )
             db.add(entry)
             db.commit()
+            record_dead_letter_metric(task_name)
     except Exception as db_exc:
         logger.error("Failed to write to dead_letter_log: %s", db_exc)
         try:
@@ -334,12 +337,14 @@ def fetch_pr_diff(self: Any, payload: dict[str, Any]) -> dict[str, Any]:
         analysis_run_id,
     )
 
+    start_ts = time.time()
     settings = get_settings()
     is_direct = getattr(self.request, "called_directly", False)
     retries = getattr(self.request, "retries", 0)
 
     # GitHub Rate Limit Check (§10.2 Branch E)
     if is_mock_mode_enabled() and os.environ.get("MOCK_GITHUB_RATE_LIMIT", "").lower() in ("true", "1", "yes") and retries == 0:
+        record_github_rate_limit(installation_id, 0)
         raw_reset = os.environ.get("MOCK_GITHUB_RESET_TS")
         reset_ts = float(raw_reset) if raw_reset and float(raw_reset) > 0 else (time.time() + 5)
         eta = datetime.fromtimestamp(reset_ts, timezone.utc)
@@ -349,6 +354,9 @@ def fetch_pr_diff(self: Any, payload: dict[str, Any]) -> dict[str, Any]:
             eta.isoformat(),
         )
         raise self.retry(queue="cp-retry", eta=eta)
+
+    # Normal rate limit headroom record (§9.2)
+    record_github_rate_limit(installation_id, 4990)
 
     # Failure injection (§7.6)
     if settings.mock_github and (
@@ -418,6 +426,7 @@ def fetch_pr_diff(self: Any, payload: dict[str, Any]) -> dict[str, Any]:
     # Pass-by-reference: store files in Redis
     files_ref = f"pr_files:{analysis_run_id}"
     save_payload_ref(files_ref, files_data, ttl=settings.diff_cache_ttl)
+    record_analysis_phase_duration("fetch", max(0.001, time.time() - start_ts), repo_full_name)
 
     return {
         "files_ref": files_ref,
@@ -537,6 +546,7 @@ def preprocess_and_chunk(self: Any, data: dict[str, Any]) -> dict[str, Any]:
 )
 def analyze_ast_task(self: Any, chunk_data: dict[str, Any]) -> dict[str, Any]:
     """Execute tree-sitter AST heuristics on a single chunk (Step 12 of §10.1)."""
+    start_ts = time.time()
     chunk = AnalysisChunk.from_dict(chunk_data)
     is_direct = getattr(self.request, "called_directly", False)
     retries = getattr(self.request, "retries", 0)
@@ -569,6 +579,7 @@ def analyze_ast_task(self: Any, chunk_data: dict[str, Any]) -> dict[str, Any]:
             raise
 
     unified_findings = [Finding.from_ast_finding(f).to_dict() for f in findings]
+    record_analysis_phase_duration("ast", max(0.001, time.time() - start_ts))
     logger.info(
         "analyze_ast completed: %s (%d findings)",
         chunk.file_path,
@@ -600,6 +611,7 @@ def analyze_llm_task(
     rate_limit_deadline: float | None = None,
 ) -> dict[str, Any]:
     """Execute LLM semantic reasoning on a batch of diff chunks (Step 13 of §10.1)."""
+    start_ts = time.time()
     diff_chunks = [AnalysisChunk.from_dict(d).to_diff_chunk() for d in chunks_data]
     is_direct = getattr(self.request, "called_directly", False)
     settings = get_settings()
@@ -794,6 +806,7 @@ def analyze_llm_task(
     # Cache successful response in Redis (24h TTL per §3.7.2)
     record_llm_telemetry(model_version, input_tokens, output_tokens, latency_ms, cache_hit=False)
     record_circuit_breaker("gemini", 0.0)
+    record_analysis_phase_duration("llm", max(0.001, time.time() - start_ts), repo_name)
     try:
         redis_client.set(
             cache_key,
@@ -836,6 +849,7 @@ def aggregate_findings(
     chunks_total: int = 0,
 ) -> dict[str, Any]:
     """Chord callback: deduplicate, map lines, format review, and run Tier 2 escalation (Step 14)."""
+    start_ts = time.time()
     analysis_run_id = context.get("analysis_run_id")
     logger.info(
         "aggregate_findings started: processing %d analysis results for %s#%s (run=%s)",
@@ -960,6 +974,8 @@ def aggregate_findings(
         high_count,
     )
 
+    record_analysis_phase_duration("aggregate", max(0.001, time.time() - start_ts), context.get("repository_full_name"))
+
     return {
         "context": context,
         "findings": [f.to_dict() for f in mapped_findings],
@@ -988,6 +1004,7 @@ def post_review_to_github(self: Any, data: dict[str, Any]) -> dict[str, Any]:
     repo_full_name = ctx["repository_full_name"]
     owner, repo = repo_full_name.split("/", 1)
     pr_number = int(ctx["pull_request_number"])
+    installation_id = ctx.get("installation_id")
     analysis_run_id = ctx.get("analysis_run_id", "")
 
     # Pass-by-reference retrieval of review payload
@@ -996,12 +1013,14 @@ def post_review_to_github(self: Any, data: dict[str, Any]) -> dict[str, Any]:
     if review_payload is None:
         review_payload = data.get("review_payload")
 
+    start_ts = time.time()
     settings = get_settings()
     is_direct = getattr(self.request, "called_directly", False)
     retries = getattr(self.request, "retries", 0)
 
     # GitHub Rate Limit Check (§10.2 Branch E)
     if is_mock_mode_enabled() and os.environ.get("MOCK_GITHUB_RATE_LIMIT", "").lower() in ("true", "1", "yes") and retries == 0:
+        record_github_rate_limit(installation_id, 0)
         raw_reset = os.environ.get("MOCK_GITHUB_RESET_TS")
         reset_ts = float(raw_reset) if raw_reset and float(raw_reset) > 0 else (time.time() + 5)
         eta = datetime.fromtimestamp(reset_ts, timezone.utc)
@@ -1011,6 +1030,9 @@ def post_review_to_github(self: Any, data: dict[str, Any]) -> dict[str, Any]:
             eta.isoformat(),
         )
         raise self.retry(queue="cp-retry", eta=eta)
+
+    # Normal rate limit headroom record (§9.2)
+    record_github_rate_limit(installation_id, 4990)
 
     # Failure injection (§7.6)
     if settings.mock_github and (
@@ -1107,6 +1129,7 @@ def post_review_to_github(self: Any, data: dict[str, Any]) -> dict[str, Any]:
             data["review_posted_at"] = None
             data["posting_error"] = str(exc)
 
+    record_analysis_phase_duration("post", max(0.001, time.time() - start_ts), repo_full_name)
     return data
 
 

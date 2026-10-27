@@ -49,7 +49,6 @@ services:
     command: ["uvicorn", "codepulse.ingestion.app:app", "--host", "0.0.0.0", "--port", "8000"]
     ports:
       - "8000:8000"
-      - "9090:9090"
     environment:
       DATABASE_URL: "postgresql://codepulse:codepulse_dev@postgres:5432/codepulse"
       REDIS_URL: "redis://redis:6379/0"
@@ -79,8 +78,6 @@ services:
       context: .
       dockerfile: Dockerfile
     command: ["celery", "-A", "codepulse.worker.celery_app", "worker", "-l", "info", "-Q", "cp-high,cp-analysis,cp-aggregate,cp-retry", "-c", "4"]
-    ports:
-      - "9091:9091"
     environment:
       DATABASE_URL: "postgresql://codepulse:codepulse_dev@postgres:5432/codepulse"
       REDIS_URL: "redis://redis:6379/0"
@@ -145,7 +142,7 @@ services:
   prometheus:
     image: prom/prometheus:v2.54.1
     ports:
-      - "9092:9090"
+      - "127.0.0.1:9092:9090"
     volumes:
       - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./deploy/prometheus/recording_rules.yml:/etc/prometheus/recording_rules.yml:ro
@@ -161,10 +158,11 @@ services:
   grafana:
     image: grafana/grafana:11.2.0
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
       GF_SECURITY_ADMIN_USER: "admin"
-      GF_SECURITY_ADMIN_PASSWORD: "admin"
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD}"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
       GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:
       - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
