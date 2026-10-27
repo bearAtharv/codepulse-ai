@@ -378,3 +378,56 @@ In an asynchronous distributed worker pool where tasks reschedule via `self.retr
    - When the follow-up review succeeds, its GitHub review ID is stored in Redis under `reanalysis:review_id:{run_id}` (30-day TTL) to maintain an audit trail without requiring an unapproved schema migration.
 
 
+---
+
+## DEC-016: Phase 8 Architecture — Redis Topology, Observability Stack, Image Panning, Cardinality Controls, and Celery Beat Replica Strategy
+
+**Context:** Section 8.1 and Section 9 specify the production Kubernetes infrastructure, Celery topology, metric exports, and logging/tracing pipelines.
+Reviewing these requirements against production realities and upstream ecosystem changes identified several critical architectural considerations.
+
+**Decisions & Specifications:**
+
+1. **Redis Topology & StatefulSet Architecture (§8.1 Deviation):**
+   - **Deviation:** Section 8.1 specifies a "Redis Cluster StatefulSet". However, Celery's underlying broker library, Kombu, does not reliably support Redis Cluster (due to multi-key transactions, non-hash-tagged atomic Lua scripts, and Celery canvas/chord limitations). Celery's official documentation explicitly warns against using Redis Cluster.
+   - **Architecture:** Deploy a single-primary Redis StatefulSet configured with Append-Only File persistence (`appendonly yes`, `appendfsync everysec`) and persistent volume claims.
+   - **Managed Redis Integration:** Helm `values.yaml` provides an `externalRedis.url` configuration option (e.g., for Google Cloud Memorystore or AWS ElastiCache). When enabled, internal Redis StatefulSet provisioning is disabled.
+   - **Future Work:** Redis Sentinel architecture is documented as future work for zero-downtime automated failover in self-hosted Kubernetes deployments without external managed Redis.
+
+2. **Log Shipper Replacement — Grafana Alloy instead of Promtail (§8.1 Deviation):**
+   - **Deviation:** Section 8.1 specifies Promtail for log shipping to Loki.
+   - **Reason:** Grafana Labs officially announced End-of-Life (EOL) for Promtail in early 2026, designating Grafana Alloy as the official unified telemetry collector for logs, metrics, and traces.
+   - **Architecture:** Deploy Grafana Alloy as a Kubernetes DaemonSet / sidecar, scraping container stdout/stderr and routing structured logs directly to Loki.
+
+3. **Pinned Official Container Image Versions (Verified October 27, 2026):**
+   - All infrastructure components must avoid unpinned or floating `latest` tags. Pinned versions verified against official upstream Docker Hub and GitHub release registries:
+     - **Prometheus:** `v2.54.1` (Official LTS bridge release; `v2.55.1` / `v3.0.0` available)
+     - **Grafana:** `11.2.0` (Official stable release supporting Scenes-powered dashboards)
+     - **Loki:** `3.1.1` (Official stable release with query acceleration and bloom planner)
+     - **Tempo:** `2.6.0` (Official stable release supporting TraceQL streaming)
+     - **Grafana Alloy:** `v1.4.2` (Official stable release replacing Promtail)
+     - **Redis:** `7.2.6-alpine` (Redis 7.2 LTS branch)
+     - **PostgreSQL:** `16.4-alpine` (PostgreSQL 16 stable branch)
+
+4. **Metric Cardinality Management & Bounded Label Space (§9.2 Guardrails):**
+   - Metric labels strictly adhere to §9.2 specifications:
+     - `http_requests_total`: `status_code`, `method`, `endpoint`
+     - `http_request_duration_seconds`: `endpoint`
+     - `webhook_events_total`: `event_type`, `action`, `status`
+     - `celery_task_duration_seconds`: `task_name`, `status`
+     - `celery_queue_depth`: `queue`
+     - `codepulse_pipeline_duration_seconds`: `status`
+     - `codepulse_findings_total`: `severity`, `category`, `source`
+     - `codepulse_files_analyzed_total`: (no dimensions)
+     - `codepulse_llm_requests_total`: `model`, `status`, `cache_hit`
+     - `codepulse_llm_tokens_total`: `model`, `token_type`
+     - `codepulse_llm_cost_cents_total`: `model`
+     - `codepulse_rate_limit_wait_seconds`: `api`
+     - `codepulse_circuit_breaker_state`: `state`
+   - **Cardinality Controls:** Any unbounded string (PR numbers, delivery UUIDs, commit SHAs, file paths, rule titles, and source code) is **strictly forbidden** in metric labels to prevent Prometheus TSDB memory exhaustion and crashes.
+   - **Label Value Cap:** Distinct values per label are capped at 200. Any dynamic value exceeding 200 distinct occurrences is automatically mapped to `"other"`.
+
+5. **Celery Beat Deployment Strategy (§8.1 Deviation):**
+   - **Deviation:** Section 8.1 specifies "Celery Beat (2 replicas with leader election)".
+   - **Reason:** Celery Beat has no native leader election protocol. Running multiple Beat replicas concurrently results in duplicated scheduled task dispatches (`scan_reanalysis_needed`, `drain_pending_persistence_task`), triggering redundant pipeline runs and API collisions.
+   - **Architecture:** Deploy Celery Beat with exactly 1 replica and `strategy: Recreate` in Kubernetes deployment manifests. This guarantees at-most-one active scheduler while Kubernetes handles automatic pod restarts upon node failure.
+

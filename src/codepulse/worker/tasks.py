@@ -67,6 +67,17 @@ from codepulse.analysis.rate_limiter import TokenBucketRateLimiter
 from codepulse.config import get_settings
 from codepulse.ingestion.diff_fetcher import PRFile, get_diff_fetcher
 from codepulse.ingestion.preprocessor import AnalysisChunk, preprocess_pr_files
+from codepulse.metrics import (
+    CHUNKS_PER_ANALYSIS,
+    RATE_LIMIT_WAIT_SECONDS,
+    record_analysis_run,
+    record_circuit_breaker,
+    record_dead_letter_metric,
+    record_finding,
+    record_github_api_call,
+    record_llm_telemetry,
+    record_pipeline_duration,
+)
 from codepulse.models.tables import AnalysisRun, DeadLetterLog, Finding as DBFinding
 from codepulse.persistence.database import (
     get_payload_ref,
@@ -481,6 +492,7 @@ def preprocess_and_chunk(self: Any, data: dict[str, Any]) -> dict[str, Any]:
     save_payload_ref(diff_ref, result.unified_diff, ttl=settings.diff_cache_ttl)
 
     # Build parallel group header for chord
+    CHUNKS_PER_ANALYSIS.observe(len(result.chunks))
     header = []
     for chunk in result.chunks:
         header.append(analyze_ast_task.s(chunk.to_dict()))
@@ -611,6 +623,7 @@ def analyze_llm_task(
                 len(diff_chunks),
                 len(cached_findings),
             )
+            record_llm_telemetry(cached_model, 0, 0, 0, cache_hit=True)
             return {
                 "type": "llm",
                 "findings": cached_findings,
@@ -673,6 +686,7 @@ def analyze_llm_task(
             jitter,
             effective_deadline - now_ts,
         )
+        RATE_LIMIT_WAIT_SECONDS.labels(api="gemini").inc(retry_delay)
         raise self.retry(
             countdown=retry_delay,
             max_retries=None,
@@ -692,6 +706,7 @@ def analyze_llm_task(
         allowed_by_breaker, breaker_state = breaker.can_execute()
 
     if not allowed_by_breaker:
+        record_circuit_breaker("gemini", 1.0)
         logger.warning(
             "Gemini circuit breaker is OPEN for run %s. Proceeding with AST-only in degraded mode (§6.4).",
             analysis_run_id,
@@ -777,6 +792,8 @@ def analyze_llm_task(
     }
 
     # Cache successful response in Redis (24h TTL per §3.7.2)
+    record_llm_telemetry(model_version, input_tokens, output_tokens, latency_ms, cache_hit=False)
+    record_circuit_breaker("gemini", 0.0)
     try:
         redis_client.set(
             cache_key,
@@ -1028,6 +1045,7 @@ def post_review_to_github(self: Any, data: dict[str, Any]) -> dict[str, Any]:
                 exc=exc,
                 retry_count=retries,
             )
+            record_dead_letter_metric("tasks.post_review_to_github")
             data["github_review_id"] = None
             data["review_posted_at"] = None
             data["posting_error"] = str(exc)
@@ -1041,6 +1059,7 @@ def post_review_to_github(self: Any, data: dict[str, Any]) -> dict[str, Any]:
             pr_number,
             review_payload,
         )
+        record_github_api_call(f"/repos/{owner}/{repo}/pulls/{pr_number}/reviews", status_code=200)
         data["github_review_id"] = response.get("id")
         data["review_posted_at"] = datetime.now(timezone.utc).isoformat()
         logger.info(
@@ -1083,6 +1102,7 @@ def post_review_to_github(self: Any, data: dict[str, Any]) -> dict[str, Any]:
                 exc=exc,
                 retry_count=retries,
             )
+            record_dead_letter_metric("tasks.post_review_to_github")
             data["github_review_id"] = None
             data["review_posted_at"] = None
             data["posting_error"] = str(exc)
@@ -1195,6 +1215,14 @@ def persist_results(self: Any, data: dict[str, Any]) -> dict[str, Any]:
                 review_posted_at=posted_at,
                 status="completed",
             )
+
+            # Record Prometheus metrics (§9.2)
+            repo_name = ctx.get("repository_full_name", "")
+            record_analysis_run("completed", repo_name)
+            if duration_ms:
+                record_pipeline_duration(duration_ms / 1000.0, "completed", repo_name)
+            for f in findings:
+                record_finding(f.severity, f.category, f.source)
 
             # 3. Graceful degradation flag (§6.4, §10.2 Branch D)
             if data.get("context", {}).get("llm_degraded"):

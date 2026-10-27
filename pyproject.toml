@@ -24,6 +24,7 @@ tree-sitter-javascript = ">=0.23"
 tree-sitter-typescript = ">=0.23"
 google-genai = ">=1.0"
 cryptography = "^50.0.1"
+prometheus-client = ">=0.20.0,<1.0.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0.0"

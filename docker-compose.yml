@@ -49,6 +49,7 @@ services:
     command: ["uvicorn", "codepulse.ingestion.app:app", "--host", "0.0.0.0", "--port", "8000"]
     ports:
       - "8000:8000"
+      - "9090:9090"
     environment:
       DATABASE_URL: "postgresql://codepulse:codepulse_dev@postgres:5432/codepulse"
       REDIS_URL: "redis://redis:6379/0"
@@ -57,6 +58,7 @@ services:
       GITHUB_WEBHOOK_SECRET: "dev_webhook_secret_not_for_production"
       ADMIN_API_KEY: "dev_admin_key_not_for_production"
       ENVIRONMENT: "development"
+      METRICS_PORT: "9090"
       MOCK_GITHUB: "true"
       MOCK_LLM: "true"
       MOCK_LLM_FAILURE: "${MOCK_LLM_FAILURE:-false}"
@@ -77,6 +79,8 @@ services:
       context: .
       dockerfile: Dockerfile
     command: ["celery", "-A", "codepulse.worker.celery_app", "worker", "-l", "info", "-Q", "cp-high,cp-analysis,cp-aggregate,cp-retry", "-c", "4"]
+    ports:
+      - "9091:9091"
     environment:
       DATABASE_URL: "postgresql://codepulse:codepulse_dev@postgres:5432/codepulse"
       REDIS_URL: "redis://redis:6379/0"
@@ -85,6 +89,8 @@ services:
       GITHUB_WEBHOOK_SECRET: "dev_webhook_secret_not_for_production"
       ADMIN_API_KEY: "dev_admin_key_not_for_production"
       ENVIRONMENT: "development"
+      WORKER_METRICS_PORT: "9091"
+      PROMETHEUS_MULTIPROC_DIR: "/tmp/prometheus_multiproc"
       MOCK_GITHUB: "true"
       MOCK_LLM: "true"
       MOCK_LLM_FAILURE: "${MOCK_LLM_FAILURE:-false}"
@@ -136,6 +142,38 @@ services:
       migrate:
         condition: service_completed_successfully
 
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    ports:
+      - "9092:9090"
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/prometheus/recording_rules.yml:/etc/prometheus/recording_rules.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+    depends_on:
+      - web
+      - worker
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: "admin"
+      GF_SECURITY_ADMIN_PASSWORD: "admin"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
 volumes:
   postgres_data:
   redis_data:
+  prometheus_data:
+  grafana_data:

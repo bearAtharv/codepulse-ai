@@ -2,6 +2,43 @@
 
 All notable changes to CodePulse AI are documented here.
 
+## [Unreleased] — Phase 8a-i: Metrics, Prometheus, and Grafana Dashboards
+
+### Added
+- **13 Canonical Prometheus Metrics (§9.2, DEC-016)** (`src/codepulse/metrics/registry.py`):
+  - Counters, Gauges, and Histograms with exact names and label sets from §9.2:
+    - `codepulse_webhooks_received_total` (`event_type`, `action`, `status`)
+    - `codepulse_analysis_runs_total` (`status`, `repository`)
+    - `codepulse_pipeline_duration_seconds` (`status`) & `codepulse_end_to_end_duration_seconds` (`repository`)
+    - `codepulse_findings_total` (`severity`, `category`, `source`)
+    - `codepulse_llm_tokens_consumed_total` (`model`, `direction`)
+    - `codepulse_llm_cost_cents_total` (`model`)
+    - `codepulse_llm_cache_hit_ratio`
+    - `codepulse_llm_latency_seconds` (`model`, `cache_hit`)
+    - `codepulse_github_api_calls_total` (`endpoint`, `status_code`)
+    - `codepulse_github_api_rate_limit_remaining` (`installation_id`)
+    - `codepulse_circuit_breaker_state` (`api`)
+    - `codepulse_dead_letter_total` (`task_name`)
+    - `codepulse_chunks_per_analysis`
+  - Latency p99 implemented as Prometheus recording rule `codepulse_analysis_latency_p99` over `codepulse_pipeline_duration_seconds` (`deploy/prometheus/recording_rules.yml`).
+- **Metric Label Cardinality & Security Boundary** (`src/codepulse/metrics/labels.py`):
+  - `LabelLimiter` capping dynamic label dimensions (`repository`, `endpoint`, `installation_id`) at 200 distinct values, mapping overflow to `"other"`.
+  - Enforced security exclusion of unbounded and sensitive data: file paths, PR numbers, delivery UUIDs, commit SHAs, rule titles, and source code fragments are strictly blocked as metric labels.
+- **Dedicated Internal Exporters & Port Isolation** (`src/codepulse/metrics/server.py`, `src/codepulse/ingestion/app.py`, `src/codepulse/worker/celery_app.py`):
+  - Dedicated internal HTTP daemon servers:
+    - Web metrics served on port 9090 (`http://localhost:9090/metrics`).
+    - Worker metrics served on port 9091 (`http://localhost:9091/metrics`), aggregating across 4 prefork worker processes via `MultiProcessCollector` and `/tmp/prometheus_multiproc`.
+  - Public application port 8000 strictly returns `404 Not Found` for `/metrics` and `/admin`.
+- **Docker Compose Observability Stack** (`docker-compose.yml`, `deploy/`):
+  - Pinned Prometheus `v2.54.1` service on port 9092 scraping `web:9090` and `worker:9091` every 5s with persistent volume `prometheus_data`.
+  - Pinned Grafana `11.2.0` service on port 3000 (`admin`/`admin`) with persistent volume `grafana_data` and automatic provisioning of Prometheus datasource and 3 dashboards:
+    1. `Pipeline Health`
+    2. `Findings & LLM`
+    3. `Resilience`
+- **Unit Tests** (`tests/test_metrics.py`):
+  - 12 comprehensive unit tests covering canonical metric registry, label limiter bounding, forbidden label prevention, exposition generation, and endpoint isolation. Full suite: **346 tests**.
+
+
 ## [Unreleased] — Phase 7b: Rate Limiting, Caching, Circuit Breaker, and Graceful Degradation
 
 ### Added

@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from codepulse.config import Settings, get_settings
 from codepulse.ingestion import service
+from codepulse.metrics import record_webhook_received
 from codepulse.persistence.database import get_db_session, get_redis_client
 import hashlib
 import hmac
@@ -76,6 +77,7 @@ async def handle_webhook(
             request.client.host if request.client else "unknown",
             request.headers.get("X-GitHub-Delivery", "unknown"),
         )
+        record_webhook_received(request.headers.get("X-GitHub-Event", "unknown"), "unknown", "error")
         raise HTTPException(status_code=401, detail="Invalid signature")
 
     # ── Step 2: Parse JSON ───────────────────────────────────────────────
@@ -87,6 +89,7 @@ async def handle_webhook(
 
     # ── Step 3: Handle ping ──────────────────────────────────────────────
     if event_type == "ping":
+        record_webhook_received("ping", "ping", "filtered")
         service.log_webhook_event(
             db, delivery_id, event_type, action, repo_full_name, processed=True
         )
@@ -99,6 +102,7 @@ async def handle_webhook(
     # ── Step 3b: Filter events ───────────────────────────────────────────
     if event_type != "pull_request" or action not in ACCEPTED_PR_ACTIONS:
         logger.debug("Filtered event: type=%s action=%s", event_type, action)
+        record_webhook_received(event_type, action or "unknown", "filtered")
         service.log_webhook_event(db, delivery_id, event_type, action, repo_full_name)
         return Response(status_code=200)
 
@@ -117,6 +121,7 @@ async def handle_webhook(
 
     if not is_new:
         logger.info("Duplicate webhook: %s", idempotency_key)
+        record_webhook_received(event_type, action or "unknown", "duplicate")
         service.log_webhook_event(
             db, delivery_id, event_type, action, repo_full_name, duplicate=True
         )
@@ -135,6 +140,7 @@ async def handle_webhook(
         logger.info(
             "DB-level duplicate for %s#%d@%s", repo_full_name, pr_number, head_sha[:8]
         )
+        record_webhook_received(event_type, action or "unknown", "duplicate")
         service.log_webhook_event(
             db, delivery_id, event_type, action, repo_full_name, duplicate=True
         )
@@ -163,6 +169,7 @@ async def handle_webhook(
     )
 
     # ── Step 7: Log and return 202 ───────────────────────────────────────
+    record_webhook_received(event_type, action or "unknown", "accepted")
     service.log_webhook_event(
         db, delivery_id, event_type, action, repo_full_name, processed=True
     )

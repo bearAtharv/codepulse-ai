@@ -6,6 +6,9 @@ for the CodePulse worker pipeline (Section 3.5).
 
 from __future__ import annotations
 
+import os
+from typing import Any
+
 import celery.app.trace
 from celery import Celery
 
@@ -15,6 +18,11 @@ from codepulse.config import get_settings
 celery.app.trace.LOG_SUCCESS = "Task %(name)s[%(id)s] succeeded in %(runtime)ss"
 
 settings = get_settings()
+
+# Ensure multiprocess metrics directory exists early if specified
+_multiproc_dir = os.environ.get("PROMETHEUS_MULTIPROC_DIR")
+if _multiproc_dir:
+    os.makedirs(_multiproc_dir, exist_ok=True)
 
 celery_app = Celery(
     "codepulse",
@@ -67,3 +75,30 @@ celery_app.conf.update(
         },
     },
 )
+
+# ── Metrics server for worker processes (§9.2, DEC-016) ─────────────
+from celery.signals import worker_init, worker_ready
+
+
+@worker_init.connect
+def on_worker_init(**kwargs: Any) -> None:
+    """Ensure multiprocess metrics directory exists."""
+    import os
+    multiproc_dir = os.environ.get("PROMETHEUS_MULTIPROC_DIR")
+    if multiproc_dir:
+        os.makedirs(multiproc_dir, exist_ok=True)
+
+
+@worker_ready.connect
+def on_worker_ready(**kwargs: Any) -> None:
+    """Start internal metrics server on port 9091 in main worker process."""
+    import logging
+    import os
+    from codepulse.metrics.server import start_metrics_server
+
+    port = int(os.environ.get("WORKER_METRICS_PORT", "9091"))
+    try:
+        start_metrics_server(port=port)
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Could not start worker metrics server on port %d: %s", port, exc)
+

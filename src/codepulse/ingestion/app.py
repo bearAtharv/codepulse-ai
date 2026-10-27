@@ -2,18 +2,44 @@
 
 from __future__ import annotations
 
+import os
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
+from codepulse.metrics.server import start_metrics_server
 from codepulse.persistence.database import get_engine, get_redis_client
 from codepulse.ingestion.admin import router as admin_router
 from codepulse.ingestion.webhook import router as webhook_router
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Start internal metrics server on isolated port 9090."""
+    import sys
+    metrics_port = int(os.environ.get("METRICS_PORT", "9090"))
+    metrics_server = None
+    if os.environ.get("TEST_ENV", "").lower() not in ("true", "1") and "pytest" not in sys.modules:
+        try:
+            metrics_server = start_metrics_server(port=metrics_port)
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning("Could not start internal metrics server: %s", exc)
+    yield
+    if metrics_server:
+        try:
+            metrics_server.shutdown()
+        except Exception:
+            pass
+
 
 app = FastAPI(
     title="CodePulse AI",
     description="AI-powered code review for security vulnerabilities and memory leaks",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 app.include_router(webhook_router)
