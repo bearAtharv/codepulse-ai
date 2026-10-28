@@ -21,10 +21,18 @@ All notable changes to CodePulse AI are documented here.
   - Grafana Alloy v1.21.2 collector discovering local Docker containers via `/var/run/docker.sock`, parsing JSON log entries, extracting low-cardinality structured labels (`service`, `level`, `container`), and shipping batches to Loki.
   - Removed `trace_id` from Loki index labels to avoid high-cardinality stream explosion, querying dynamically via LogQL JSON parsing.
   - Provisioned Grafana Loki datasource (`LOKI_DEFAULT`) and `Application Logs` dashboard (`application-logs`).
-- **Component Version Upgrades & Patch Pinning (DEC-019)**:
+- **Component Version Upgrades & Patch Pinning (DEC-019, DEC-020)**:
   - Upgraded Prometheus to v3.15.1, Grafana to 13.3.0, Loki to 3.7.9, Alloy to v1.21.2.
-  - Pinned PostgreSQL to 16.15-alpine and Redis to 7.2.17-alpine (BSD-3 licensed LTS series).
-- **15 unit & integration tests** (`tests/test_logging.py`). Total test suite: **363 tests**.
+  - Pinned PostgreSQL to 16.15-alpine and Redis to 7.2.17-alpine (BSD-3 licensed LTS series supported through Dec 2029).
+  - Pinned all six external container images by exact immutable SHA-256 digest.
+- **Port Isolation & Redis Authentication (DEC-022)**:
+  - Bound `postgres` (5432) and `redis` (6379) strictly to `127.0.0.1`. Web port 8000 remains on `0.0.0.0` for webhook ingress tunnels.
+  - Added Redis `requirepass` password authentication with secure secret in untracked `.env` and authenticated connection strings across Celery, rate limiter, circuit breaker, and payload cache.
+- **Circuit Breaker & Failure Injection Alignment**:
+  - Refactored `MOCK_LLM_FAILURE` in `tasks.py` to raise within the execution block and call `record_failure()`, properly exercising the real 5-failure sliding window counter rather than short-circuiting the breaker state.
+- **Follow-Up Re-analysis Primary Review ID Preservation**:
+  - Ensured follow-up reviews store their GitHub review ID in Redis (`reanalysis:review_id:{run.id}`) and never overwrite the primary review's `analysis_runs.github_review_id`.
+- **16 unit & integration tests** (`tests/test_logging.py`, `tests/test_phase7b.py`). Total test suite: **364 tests**.
 
 ## [Phase 8a-i] — Metrics, Prometheus, and Grafana Dashboards
 

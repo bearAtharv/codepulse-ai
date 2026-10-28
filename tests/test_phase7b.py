@@ -639,6 +639,7 @@ class TestRateLimitHardening:
         repo, run = test_repo_and_run
         run.reanalysis_needed = True
         run.head_sha = "1" * 40
+        run.github_review_id = 55554444
         db_session.commit()
 
         redis_client = get_redis_client()
@@ -718,6 +719,7 @@ class TestRateLimitHardening:
         repo, run = test_repo_and_run
         run.reanalysis_needed = True
         run.head_sha = "1" * 40
+        run.github_review_id = 55554444
         db_session.commit()
 
         redis_client = get_redis_client()
@@ -769,6 +771,7 @@ class TestRateLimitHardening:
                 reloaded_run = db_session.get(AnalysisRun, run.id)
                 assert reloaded_run is not None
                 assert reloaded_run.reanalysis_needed is False
+                assert reloaded_run.github_review_id == 55554444
 
                 # Verify follow-up review ID stored in Redis
                 stored_id = redis_client.get(f"reanalysis:review_id:{run.id}")
@@ -988,3 +991,38 @@ class TestComposeAndTaskIsolationFixes:
             reloaded_unposted = db_session.get(DBFinding, unposted.id)
             assert reloaded_unposted is not None
             assert reloaded_unposted.is_posted is True
+
+    def test_injected_llm_failure_exercises_real_failure_counter_and_trips_at_threshold(self) -> None:
+        """Single injected failure increments counter but keeps breaker CLOSED; 5 failures trip to OPEN."""
+        from codepulse.persistence.database import get_redis_client
+        from codepulse.analysis.circuit_breaker import CircuitBreaker
+        from codepulse.worker.tasks import analyze_llm_task
+
+        redis_client = get_redis_client()
+        breaker = CircuitBreaker(redis_client, name="gemini")
+        redis_client.delete(breaker.state_key, breaker.failures_key, breaker.opened_at_key)
+
+        chunk = make_chunk_dict()
+        with patch.dict(os.environ, {"MOCK_LLM": "true", "MOCK_LLM_FAILURE": "true"}):
+            # 1st failure: increments counter, breaker is STILL CLOSED
+            res1 = analyze_llm_task([chunk], "org/repo", "python", str(uuid.uuid4()))
+            assert res1["llm_degraded"] is True
+            assert res1["error"] == "Simulated Gemini API failure (injected)"
+            assert breaker.get_state() == "CLOSED"
+            assert int(redis_client.get(breaker.failures_key) or 0) == 1
+
+            # Failures 2, 3, 4: still CLOSED
+            for expected_count in [2, 3, 4]:
+                analyze_llm_task([chunk], "org/repo", "python", str(uuid.uuid4()))
+                assert breaker.get_state() == "CLOSED"
+                assert int(redis_client.get(breaker.failures_key) or 0) == expected_count
+
+            # 5th failure: trips breaker to OPEN
+            analyze_llm_task([chunk], "org/repo", "python", str(uuid.uuid4()))
+            assert breaker.get_state() == "OPEN"
+
+            # 6th attempt: intercepted at step 3 by circuit breaker check
+            res6 = analyze_llm_task([chunk], "org/repo", "python", str(uuid.uuid4()))
+            assert res6["llm_degraded"] is True
+            assert res6["error"] == "Circuit breaker OPEN"
+

@@ -513,39 +513,80 @@ Reviewing these requirements against production realities and upstream ecosystem
 
 ---
 
-## DEC-019: Component Upgrades, Container Socket Clarification, and Observability Metrics Alignment
+## DEC-019: Component Version Currency, Patch Pinning, and Image Digests
 
-**Context:** Phase 8a-ii requires verifying component version currency, pinning exact patch tags, rotating credentials, clarifying the local Docker daemon socket mount in Alloy, documenting trace/span context boundaries, and justifying non-§9.2 metrics.
+**Context:** Phase 8a-ii requires verifying component version currency, pinning exact patch tags and immutable image digests (`@sha256:...`) across all infrastructure containers, and documenting upstream build changes.
 
 **Decisions & Specifications:**
 
-1. **Exact Component Patch Version Upgrades:**
-   - **Prometheus (`prom/prometheus:v3.15.1`):** Upgraded from v2.54.1 to v3.15.1 (Released 2026-10-21, `https://github.com/prometheus/prometheus/releases/tag/v3.15.1`). Verified all scrapers and recording rules (`codepulse_analysis_latency_p99`) load cleanly.
-   - **Grafana (`grafana/grafana:13.3.0`):** Upgraded from 11.2.0 to 13.3.0 (Released 2026-10-27, `https://github.com/grafana/grafana/releases/tag/v13.3.0`). Verified datasource health (`PBFA97CFB590B2093`, `LOKI_DEFAULT`) and all four provisioned dashboards.
-   - **Loki (`grafana/loki:3.7.9`):** Upgraded from 3.1.1 to 3.7.9 (Released 2026-10-20, `https://github.com/grafana/loki/releases/tag/v3.7.9`). Verified `/ready` endpoint and schema compatibility.
-   - **Alloy (`grafana/alloy:v1.21.2`):** Upgraded from v1.4.2 to v1.21.2 (Released 2026-10-22, `https://github.com/grafana/alloy/releases/tag/v1.21.2`). Verified Alloy configuration syntax and log delivery to Loki.
-   - **PostgreSQL (`postgres:16.15-alpine`):** Pinned to exact patch release 16.15-alpine (Released 2026-08-13, `https://www.postgresql.org/docs/release/16.15/`).
-   - **Redis (`redis:7.2.17-alpine`):** Pinned to exact patch release 7.2.17-alpine (Released August 2026, `https://github.com/redis/redis/releases/tag/7.2.17`).
+1. **Exact Component Patch Version Upgrades and Digest Pinning:**
+   - **PostgreSQL (`postgres:16.15-alpine`):** Pinned to `postgres:16.15-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685`. Official release: 16.15 (August 13, 2026, `https://www.postgresql.org/docs/release/16.15/`).
+   - **Redis (`redis:7.2.17-alpine`):** Pinned to `redis:7.2.17-alpine@sha256:4517169c589fb91a3630f9e0a129cd407c7bd8596f9e67dcb9e4af167ce2f9c5`. Official release: 7.2.17 (August 2026, `https://github.com/redis/redis/releases/tag/7.2.17`).
+     - *Upstream Image Rebuild Notice:* The Alpine 3.20 base image for Redis was rebuilt on October 26, 2026 to incorporate upstream security patches, resulting in a refreshed image ID and digest. The new build was verified against Kombu/Celery broker operations, the Lua token-bucket rate limiter, and Redis circuit breaker persistence.
+   - **Prometheus (`prom/prometheus:v3.15.1`):** Pinned to `prom/prometheus:v3.15.1@sha256:fa3302279710be2f21a8301ec17a8b4f2301fd829bd113839b3b6b02b6f191a2`. Official release: v3.15.1 (October 21, 2026, `https://github.com/prometheus/prometheus/releases/tag/v3.15.1`).
+   - **Grafana (`grafana/grafana:13.3.0`):** Pinned to `grafana/grafana:13.3.0@sha256:488984b716c0862639f91a698adbe2862677a5a07bad42da5f03f3030883b205`. Official release: 13.3.0 (October 27, 2026, `https://github.com/grafana/grafana/releases/tag/v13.3.0`).
+     - *Risk Assessment & Mitigation:* Released on October 27, 2026. Contains an upstream regression (GitHub Issue #136271: HTTP 501 quota check error in self-hosted OSS dashboard browser). Mitigated in local Compose provisioning via file-based dashboard mounting (`/etc/grafana/provisioning/dashboards`) with empty overrides. Datasource health (`PBFA97CFB590B2093`, `LOKI_DEFAULT`) and dashboard rendering verified. Tracked for validation prior to Phase 8b production migration.
+   - **Loki (`grafana/loki:3.7.9`):** Pinned to `grafana/loki:3.7.9@sha256:0db216b630ae1f348a1584c67f3cead8b4c1fc839169a39501db664744158e28`. Official release: 3.7.9 (October 20, 2026, `https://github.com/grafana/loki/releases/tag/v3.7.9`).
+   - **Alloy (`grafana/alloy:v1.21.2`):** Pinned to `grafana/alloy:v1.21.2@sha256:89a5a320168387336b9ac3c850609c3ba7757eadd4ae5f1d819deb35e9854b18`. Official release: v1.21.2 (October 22, 2026, `https://github.com/grafana/alloy/releases/tag/v1.21.2`).
 
-2. **Redis 7.2 Licensing Rationale:**
-   - Redis changed its licensing model starting in Redis 7.4 from the open-source BSD 3-Clause license to dual source-available licenses (SSPLv1 and RSALv2).
-   - Redis 7.2 remains the latest open-source, BSD-3-licensed release series.
-   - Tested and verified: Kombu/Celery broker compatibility, Lua token-bucket rate limiter atomic script execution (`(True, 0.0)`), and circuit breaker state transitions operate identically and without regression.
+## DEC-020: Redis 7.2 vs Redis 8 AGPLv3 Licensing and Support Lifecycle
 
-3. **Alloy Docker Socket Mount (`/var/run/docker.sock:ro`):**
-   - In the local Docker Compose development environment, Alloy uses `discovery.docker` and mounts `/var/run/docker.sock` in read-only mode (`:ro`) to discover running containers and tail log streams.
-   - **Development-Only Caveat:** This socket mount is strictly a local Compose convenience. In production Kubernetes environments (Phase 8b), mounting the host Docker/CRI socket is prohibited by security policy. Instead, Alloy will deploy as a Kubernetes DaemonSet using `local.file_match` to scrape container logs directly from node log files (`/var/log/pods/*/*/*.log`) without host socket privileges.
+**Context:** Evaluating Redis versions across licensing changes and long-term support guarantees.
 
-4. **Span ID Context Scope (Phase 8a-ii vs Phase 8a-iii):**
-   - Under Phase 8a-ii, `trace_id` (32 hex characters) uniquely identifies the end-to-end webhook request and Celery pipeline execution, while `span_id` (16 hex characters) is generated at webhook entry and forwarded through task headers/payloads.
-   - In Celery tasks, `span_id` currently reflects this common execution span identifier. Full distributed span derivation with distinct child span IDs and parent-span linkages will be added in Phase 8a-iii with the OpenTelemetry SDK.
+**Decisions & Specifications:**
 
-5. **Observability Metric Rationales (Canonical §9.2 vs Extended Metrics):**
-   - Section 9.2 specifies 13 core metrics: `codepulse_webhooks_received_total`, `codepulse_analysis_runs_total`, `codepulse_pipeline_duration_seconds`, `codepulse_end_to_end_duration_seconds`, `codepulse_findings_total`, `codepulse_ast_rules_triggered_total`, `codepulse_llm_cache_hits_total`, `codepulse_llm_cache_misses_total`, `codepulse_llm_tokens_consumed_total`, `codepulse_rate_limit_wait_seconds`, `codepulse_circuit_breaker_state`, `codepulse_dead_letter_total`, and `codepulse_github_api_rate_limit_remaining`.
-   - All 13 canonical §9.2 metrics are fully registered and emitted.
-   - Additional metrics registered during implementation are justified as follows:
-     - `codepulse_llm_tokens_total` and `codepulse_llm_cost_cents_total`: Added for granular LLM token accounting by direction and financial cost attribution (in cents) across model invocations.
-     - `codepulse_analysis_duration_seconds`: Emits granular per-phase latencies (`fetch`, `ast`, `llm`, `aggregate`, `post`) to support dashboard breakdown of internal pipeline stages without colliding with `codepulse_pipeline_duration_seconds` (which measures full run duration by status).
+1. **Licensing Evolution:**
+   - On May 1, 2025, Redis Ltd announced Redis 8 GA with a tri-license model: AGPLv3 (OSI-approved copyleft), RSALv2, and SSPLv1 (`https://redis.io/legal/licenses/`, `https://redis.io/blog/redis-adopts-dual-source-available-licensing/`).
+   - Redis 7.2 is the final release line under the permissive 3-Clause BSD license.
+2. **Support Lifecycle:**
+   - Redis 7.2 is in active extended support through December 1, 2029 (`https://redis.io/legal/licenses/` and `https://endoflife.date/redis`).
+3. **Architecture Decision:**
+   - CodePulse maintains `redis:7.2.17-alpine` under BSD-3 to avoid AGPLv3 copyleft network-distribution obligations (Section 13) in enterprise deployments.
+   - Kombu/Celery broker compatibility, Lua atomic token-bucket execution, and circuit breaker operations are verified and fully supported on Redis 7.2.17. Any future transition to Redis 8 must be vetted for AGPLv3 compliance.
+
+## DEC-021: Alloy Container Socket Mount (`/var/run/docker.sock:ro`) as Dev-Only Compose Convenience
+
+**Context:** Alloy requires container discovery in Docker Compose to tail application logs and inject metadata labels into Loki.
+
+**Decisions & Specifications:**
+
+1. **Local Compose Convenience:**
+   - In `docker-compose.yml`, Alloy mounts `/var/run/docker.sock:ro` with `discovery.docker` to discover containers (`codepulse-web`, `codepulse-worker`, `codepulse-beat`) and tail their logs.
+2. **Production Policy (Phase 8b):**
+   - Mounting the Docker or CRI host socket in production Kubernetes environments is prohibited by security policy.
+   - For Phase 8b, Alloy will deploy as a Kubernetes DaemonSet using `local.file_match` to scrape container logs directly from node log paths (`/var/log/pods/*/*/*.log`) without host socket privileges.
+
+## DEC-022: Local Loopback Port Isolation and Redis Password Authentication
+
+**Context:** Hardening network perimeter exposure and securing in-memory cache/broker access in Docker Compose.
+
+**Decisions & Specifications:**
+
+1. **Network Interface Binding:**
+   - `postgres` (port 5432) and `redis` (port 6379) are strictly bound to `127.0.0.1` (`127.0.0.1:5432:5432` and `127.0.0.1:6379:6379`). They are never exposed on `0.0.0.0` or external network adapters.
+   - `web` (port 8000) remains bound to `0.0.0.0:8000` to allow inbound webhook ingress tunnels (e.g. ngrok, smee, cloudflared) during testing.
+2. **Redis Password Authentication:**
+   - Redis enforces `--requirepass "${REDIS_PASSWORD}"`.
+   - `.env.example` provides a non-secret developer placeholder (`REDIS_PASSWORD=change_me_redis_password_dev`).
+   - The real password is kept exclusively in the untracked `.env` file.
+   - Celery broker (`CELERY_BROKER_URL`), Celery backend (`CELERY_RESULT_BACKEND`), rate limiter, circuit breaker, and payload cache connect via authenticated `redis://:${REDIS_PASSWORD}@...` URLs.
+
+## DEC-023: Supplementary Observability Metrics Justification and Mock Data Provenance
+
+**Context:** Distinguishing canonical §9.2 metrics from supplementary observability extensions, and establishing provenance for mock data fixtures.
+
+**Decisions & Specifications:**
+
+1. **Canonical §9.2 Metrics:**
+   - All 13 canonical §9.2 metrics are registered, scraped, and verified in Prometheus:
+     `codepulse_webhooks_received_total`, `codepulse_analysis_runs_total`, `codepulse_pipeline_duration_seconds`, `codepulse_end_to_end_duration_seconds`, `codepulse_findings_total`, `codepulse_ast_rules_triggered_total`, `codepulse_llm_cache_hits_total`, `codepulse_llm_cache_misses_total`, `codepulse_llm_tokens_consumed_total`, `codepulse_rate_limit_wait_seconds`, `codepulse_circuit_breaker_state`, `codepulse_dead_letter_total`, and `codepulse_github_api_rate_limit_remaining`.
+2. **Supplementary Metrics Justification:**
+   - `codepulse_llm_tokens_total` and `codepulse_llm_cost_cents_total`: Added to provide direction-specific token accounting (prompt vs completion) and financial cost accounting in cents.
+   - `codepulse_analysis_duration_seconds`: Provides fine-grained per-phase latency tracking (`fetch`, `ast`, `llm`, `aggregate`, `post`) to power the Phase 8 Grafana Pipeline Performance breakdown without colliding with `codepulse_pipeline_duration_seconds` (which tracks overall run duration by terminal status).
+3. **Mock Data Provenance:**
+   - `codepulse_github_api_rate_limit_remaining`: Under mock mode (`MOCK_GITHUB=true`), returns a static quota value of `4990` generated by `MockGitHubPoster` and `MockDiffFetcher` simulating an active GitHub App installation token. In production, this value is extracted dynamically from the HTTP response header `x-ratelimit-remaining`.
+   - Mock Installation IDs (`12345`, `54321`, `99101`): Test fixtures defined in webhook generator scripts to simulate GitHub App installation contexts for repositories `corp-healthy/repo-alpha` and `corp-healthy/repo-beta`. Documented as test fixtures.
+
 
 
 

@@ -734,12 +734,7 @@ def analyze_llm_task(
 
     # 3. Circuit Breaker (§6.3, §10.2 Branch D)
     breaker = CircuitBreaker(redis_client, name="gemini")
-    if is_mock_mode_enabled() and os.environ.get("MOCK_LLM_FAILURE", "").lower() in ("true", "1", "yes"):
-        breaker.record_failure()
-        logger.warning("Simulated LLM failure injected. Breaker state: %s", breaker.get_state())
-        allowed_by_breaker = False
-    else:
-        allowed_by_breaker, breaker_state = breaker.can_execute()
+    allowed_by_breaker, breaker_state = breaker.can_execute()
 
     if not allowed_by_breaker:
         record_circuit_breaker("gemini", 1.0)
@@ -764,6 +759,9 @@ def analyze_llm_task(
     # 4. Invoke LLM Analysis
     start_time = time.perf_counter()
     try:
+        if is_mock_mode_enabled() and os.environ.get("MOCK_LLM_FAILURE", "").lower() in ("true", "1", "yes"):
+            logger.warning("Simulated LLM invocation failure injected (MOCK_LLM_FAILURE=true). Breaker state: %s", breaker.get_state())
+            raise RuntimeError("Simulated Gemini API failure (injected)")
         llm_result = analyze_llm(diff_chunks, repo_name, language)
         breaker.record_success()
     except (Retry, Ignore):

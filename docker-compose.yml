@@ -1,12 +1,12 @@
 services:
   postgres:
-    image: postgres:16.15-alpine
+    image: postgres:16.15-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
     environment:
       POSTGRES_USER: codepulse
       POSTGRES_PASSWORD: codepulse_dev
       POSTGRES_DB: codepulse
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -16,13 +16,16 @@ services:
       retries: 5
 
   redis:
-    image: redis:7.2.17-alpine
+    image: redis:7.2.17-alpine@sha256:4517169c589fb91a3630f9e0a129cd407c7bd8596f9e67dcb9e4af167ce2f9c5
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}"]
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
+    environment:
+      REDIS_PASSWORD: "${REDIS_PASSWORD}"
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep PONG"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -34,7 +37,7 @@ services:
     command: ["alembic", "upgrade", "head"]
     environment:
       DATABASE_URL: "postgresql://codepulse:codepulse_dev@postgres:5432/codepulse"
-      REDIS_URL: "redis://redis:6379/0"
+      REDIS_URL: "redis://:${REDIS_PASSWORD}@redis:6379/0"
       GITHUB_WEBHOOK_SECRET: "dev_webhook_secret_not_for_production"
     depends_on:
       postgres:
@@ -51,9 +54,9 @@ services:
       - "8000:8000"
     environment:
       DATABASE_URL: "postgresql://codepulse:codepulse_dev@postgres:5432/codepulse"
-      REDIS_URL: "redis://redis:6379/0"
-      CELERY_BROKER_URL: "redis://redis:6379/0"
-      CELERY_RESULT_BACKEND: "redis://redis:6379/0"
+      REDIS_URL: "redis://:${REDIS_PASSWORD}@redis:6379/0"
+      CELERY_BROKER_URL: "redis://:${REDIS_PASSWORD}@redis:6379/0"
+      CELERY_RESULT_BACKEND: "redis://:${REDIS_PASSWORD}@redis:6379/0"
       GITHUB_WEBHOOK_SECRET: "dev_webhook_secret_not_for_production"
       ADMIN_API_KEY: "dev_admin_key_not_for_production"
       ENVIRONMENT: "development"
@@ -81,9 +84,9 @@ services:
     command: ["celery", "-A", "codepulse.worker.celery_app", "worker", "-l", "info", "-Q", "cp-high,cp-analysis,cp-aggregate,cp-retry", "-c", "4"]
     environment:
       DATABASE_URL: "postgresql://codepulse:codepulse_dev@postgres:5432/codepulse"
-      REDIS_URL: "redis://redis:6379/0"
-      CELERY_BROKER_URL: "redis://redis:6379/0"
-      CELERY_RESULT_BACKEND: "redis://redis:6379/0"
+      REDIS_URL: "redis://:${REDIS_PASSWORD}@redis:6379/0"
+      CELERY_BROKER_URL: "redis://:${REDIS_PASSWORD}@redis:6379/0"
+      CELERY_RESULT_BACKEND: "redis://:${REDIS_PASSWORD}@redis:6379/0"
       GITHUB_WEBHOOK_SECRET: "dev_webhook_secret_not_for_production"
       ADMIN_API_KEY: "dev_admin_key_not_for_production"
       ENVIRONMENT: "development"
@@ -116,9 +119,9 @@ services:
     command: ["celery", "-A", "codepulse.worker.celery_app", "beat", "-l", "info"]
     environment:
       DATABASE_URL: "postgresql://codepulse:codepulse_dev@postgres:5432/codepulse"
-      REDIS_URL: "redis://redis:6379/0"
-      CELERY_BROKER_URL: "redis://redis:6379/0"
-      CELERY_RESULT_BACKEND: "redis://redis:6379/0"
+      REDIS_URL: "redis://:${REDIS_PASSWORD}@redis:6379/0"
+      CELERY_BROKER_URL: "redis://:${REDIS_PASSWORD}@redis:6379/0"
+      CELERY_RESULT_BACKEND: "redis://:${REDIS_PASSWORD}@redis:6379/0"
       GITHUB_WEBHOOK_SECRET: "dev_webhook_secret_not_for_production"
       ADMIN_API_KEY: "dev_admin_key_not_for_production"
       ENVIRONMENT: "development"
@@ -143,7 +146,7 @@ services:
         condition: service_completed_successfully
 
   prometheus:
-    image: prom/prometheus:v3.15.1
+    image: prom/prometheus:v3.15.1@sha256:fa3302279710be2f21a8301ec17a8b4f2301fd829bd113839b3b6b02b6f191a2
     ports:
       - "127.0.0.1:9092:9090"
     volumes:
@@ -159,7 +162,7 @@ services:
       - worker
 
   grafana:
-    image: grafana/grafana:13.3.0
+    image: grafana/grafana:13.3.0@sha256:488984b716c0862639f91a698adbe2862677a5a07bad42da5f03f3030883b205
     ports:
       - "127.0.0.1:3000:3000"
     environment:
@@ -175,7 +178,7 @@ services:
       - loki
 
   loki:
-    image: grafana/loki:3.7.9
+    image: grafana/loki:3.7.9@sha256:0db216b630ae1f348a1584c67f3cead8b4c1fc839169a39501db664744158e28
     user: "0:0"
     ports:
       - "127.0.0.1:3100:3100"
@@ -185,7 +188,7 @@ services:
     command: ["-config.file=/etc/loki/local-config.yaml"]
 
   alloy:
-    image: grafana/alloy:v1.21.2
+    image: grafana/alloy:v1.21.2@sha256:89a5a320168387336b9ac3c850609c3ba7757eadd4ae5f1d819deb35e9854b18
     volumes:
       - ./deploy/alloy/config.alloy:/etc/alloy/config.alloy:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro

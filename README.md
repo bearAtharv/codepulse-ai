@@ -342,12 +342,17 @@ The `analysis_runs` table has a unique constraint on `(repository_id, pull_reque
 - **Log Sanitization & Secret Redaction Filter (§9.4, DEC-018)** (`src/codepulse/observability/redaction.py`):
   - `SecretAndCodeSanitizer` logging filter automatically intercepting log records to redact Gemini API keys (`AIza...`), GitHub classic & fine-grained PATs (`ghp_...`, `github_pat_...`), HTTP Bearer tokens, JWTs, database connection string passwords, private keys, and unified diff patches (`diff --git`, `@@ -... @@`).
   - Prohibits customer source code and raw diff chunks from appearing in logs.
+- **Port Isolation & Redis Security (DEC-022)**:
+  - `postgres` (5432) and `redis` (6379) bound strictly to `127.0.0.1`. Web port 8000 remains accessible on `0.0.0.0` for inbound webhook tunnels.
+  - Redis authentication enforced via `--requirepass` with authenticated Celery and cache URLs.
+- **Component Version Upgrades & Image Digest Pinning (DEC-019, DEC-020)**:
+  - Pinned all six external container images by exact immutable SHA-256 digest (`postgres:16.15-alpine`, `redis:7.2.17-alpine`, `prom/prometheus:v3.15.1`, `grafana/grafana:13.3.0`, `grafana/loki:3.7.9`, `grafana/alloy:v1.21.2`).
 - **Loki & Grafana Alloy Telemetry Pipeline** (`deploy/loki/`, `deploy/alloy/`, `docker-compose.yml`):
   - Grafana Loki 3.7.9 configured with single-binary TSDB v13 schema and filesystem chunk storage on `127.0.0.1:3100`.
   - Grafana Alloy v1.21.2 collector discovering local Docker containers via `/var/run/docker.sock`, parsing JSON log entries, extracting low-cardinality structured labels (`service`, `level`, `container`), and shipping batches to Loki.
   - `trace_id` is excluded from index labels to prevent high-cardinality stream explosion; queries filter via LogQL JSON parsing (`| json | trace_id = "..."`).
   - Provisioned Grafana Loki datasource (`LOKI_DEFAULT`) and `Application Logs` dashboard (`application-logs`).
-- **15 unit & integration tests** (`tests/test_logging.py`). Total test suite: **363 tests**.
+- **16 unit & integration tests** (`tests/test_logging.py`, `tests/test_phase7b.py`). Total test suite: **364 tests**.
 
 ---
 
@@ -457,12 +462,13 @@ tests/
 ├── test_webhook.py           # Phase 2 + Slice 5-6: 31 webhook & health tests
 ├── test_ast_engine.py        # Phase 3 + Slice 6: 77 AST engine tests (parameterized)
 ├── test_llm_engine.py        # Phase 4 + Slice 6: 54 LLM engine tests (parameterized)
-├── test_aggregation.py       # Phase 5: 33 aggregation, dedup, line mapping & posting tests
-├── test_phase6a.py           # Phase 6a: 27 diff fetcher, preprocessor & persistence tests
+├── test_aggregation.py       # Phase 5: 34 aggregation, dedup, line mapping & posting tests
+├── test_phase6a.py           # Phase 6a: 51 diff fetcher, preprocessor & persistence tests
 ├── test_phase7a.py           # Phase 7a: 12 reference-passing, retry & DLQ tests
-├── test_phase7b.py           # Phase 7b: 18 rate limit, circuit breaker, cache & degradation tests
-├── test_metrics.py           # Phase 8a-i: 12 metric registration, label limiter & export tests
-└── test_pipeline.py          # Phase 6b: 14 Celery pipeline, chord flow & worker tests
+├── test_phase7b.py           # Phase 7b: 28 rate limit, circuit breaker, cache & degradation tests
+├── test_metrics.py           # Phase 8a-i: 14 metric registration, label limiter & export tests
+├── test_logging.py           # Phase 8a-ii: 15 structured logging, redaction & trace ID tests
+└── test_pipeline.py          # Phase 6b: 18 Celery pipeline, chord flow & worker tests
 ```
 
 ---
