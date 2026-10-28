@@ -525,7 +525,7 @@ Reviewing these requirements against production realities and upstream ecosystem
      - *Upstream Image Rebuild Notice:* The Alpine 3.20 base image for Redis was rebuilt on October 26, 2026 to incorporate upstream security patches, resulting in a refreshed image ID and digest. The new build was verified against Kombu/Celery broker operations, the Lua token-bucket rate limiter, and Redis circuit breaker persistence.
    - **Prometheus (`prom/prometheus:v3.15.1`):** Pinned to `prom/prometheus:v3.15.1@sha256:fa3302279710be2f21a8301ec17a8b4f2301fd829bd113839b3b6b02b6f191a2`. Official release: v3.15.1 (October 21, 2026, `https://github.com/prometheus/prometheus/releases/tag/v3.15.1`).
    - **Grafana (`grafana/grafana:13.3.0`):** Pinned to `grafana/grafana:13.3.0@sha256:488984b716c0862639f91a698adbe2862677a5a07bad42da5f03f3030883b205`. Official release: 13.3.0 (October 27, 2026, `https://github.com/grafana/grafana/releases/tag/v13.3.0`).
-     - *Risk Assessment & Mitigation:* Released on October 27, 2026. Contains an upstream regression (GitHub Issue #136271: HTTP 501 quota check error in self-hosted OSS dashboard browser). Mitigated in local Compose provisioning via file-based dashboard mounting (`/etc/grafana/provisioning/dashboards`) with empty overrides. Datasource health (`PBFA97CFB590B2093`, `LOKI_DEFAULT`) and dashboard rendering verified. Tracked for validation prior to Phase 8b production migration.
+     - *Risk Assessment & Mitigation:* Released on October 27, 2026. Upstream regression tracked in GitHub Issue #136271 (`https://github.com/grafana/grafana/issues/136271`: "Dashboards: browse view's quota check returns 501 and logs an error on every page load (OSS 13.3.0)"). Mitigated in local Compose provisioning via file-based dashboard mounting (`/etc/grafana/provisioning/dashboards`) with empty overrides. Datasource health (`PBFA97CFB590B2093`, `LOKI_DEFAULT`) and dashboard rendering verified. Tracked for validation prior to Phase 8b production migration.
    - **Loki (`grafana/loki:3.7.9`):** Pinned to `grafana/loki:3.7.9@sha256:0db216b630ae1f348a1584c67f3cead8b4c1fc839169a39501db664744158e28`. Official release: 3.7.9 (October 20, 2026, `https://github.com/grafana/loki/releases/tag/v3.7.9`).
    - **Alloy (`grafana/alloy:v1.21.2`):** Pinned to `grafana/alloy:v1.21.2@sha256:89a5a320168387336b9ac3c850609c3ba7757eadd4ae5f1d819deb35e9854b18`. Official release: v1.21.2 (October 22, 2026, `https://github.com/grafana/alloy/releases/tag/v1.21.2`).
 
@@ -539,7 +539,7 @@ Reviewing these requirements against production realities and upstream ecosystem
    - On May 1, 2025, Redis Ltd announced Redis 8 GA with a tri-license model: AGPLv3 (OSI-approved copyleft), RSALv2, and SSPLv1 (`https://redis.io/legal/licenses/`, `https://redis.io/blog/redis-adopts-dual-source-available-licensing/`).
    - Redis 7.2 is the final release line under the permissive 3-Clause BSD license.
 2. **Support Lifecycle:**
-   - Redis 7.2 is in active extended support through December 1, 2029 (`https://redis.io/legal/licenses/` and `https://endoflife.date/redis`).
+   - Redis 7.2 active bugfix support concluded on July 29, 2024, and extended security maintenance continues through December 1, 2029 (documented at `https://endoflife.date/redis` and `https://endoflife.date/api/redis.json`: cycle 7.2, eol: 2029-12-01; see also official lifecycle policy at `https://redis.io/docs/latest/operate/rs/lifecycle-and-support/`).
 3. **Architecture Decision:**
    - CodePulse maintains `redis:7.2.17-alpine` under BSD-3 to avoid AGPLv3 copyleft network-distribution obligations (Section 13) in enterprise deployments.
    - Kombu/Celery broker compatibility, Lua atomic token-bucket execution, and circuit breaker operations are verified and fully supported on Redis 7.2.17. Any future transition to Redis 8 must be vetted for AGPLv3 compliance.
@@ -578,11 +578,12 @@ Reviewing these requirements against production realities and upstream ecosystem
 **Decisions & Specifications:**
 
 1. **Canonical §9.2 Metrics:**
-   - All 13 canonical §9.2 metrics are registered, scraped, and verified in Prometheus:
-     `codepulse_webhooks_received_total`, `codepulse_analysis_runs_total`, `codepulse_pipeline_duration_seconds`, `codepulse_end_to_end_duration_seconds`, `codepulse_findings_total`, `codepulse_ast_rules_triggered_total`, `codepulse_llm_cache_hits_total`, `codepulse_llm_cache_misses_total`, `codepulse_llm_tokens_consumed_total`, `codepulse_rate_limit_wait_seconds`, `codepulse_circuit_breaker_state`, `codepulse_dead_letter_total`, and `codepulse_github_api_rate_limit_remaining`.
+   - All 13 canonical §9.2 metrics defined in `codepulse_ai_architecture.md` are registered, scraped, and verified in Prometheus:
+     `codepulse_webhooks_received_total`, `codepulse_analysis_runs_total`, `codepulse_analysis_duration_seconds`, `codepulse_end_to_end_duration_seconds`, `codepulse_findings_total`, `codepulse_llm_cache_hit_ratio`, `codepulse_llm_tokens_consumed_total`, `codepulse_llm_latency_seconds`, `codepulse_github_api_calls_total`, `codepulse_github_api_rate_limit_remaining`, `codepulse_circuit_breaker_state`, `codepulse_dead_letter_total`, and `codepulse_chunks_per_analysis`.
 2. **Supplementary Metrics Justification:**
+   - `codepulse_pipeline_duration_seconds`: Overall pipeline duration by completion status used for the p99 latency recording rule and summary dashboards.
+   - `codepulse_rate_limit_wait_seconds`: Tracks cumulative seconds tasks are delayed due to rate limiting.
    - `codepulse_llm_tokens_total` and `codepulse_llm_cost_cents_total`: Added to provide direction-specific token accounting (prompt vs completion) and financial cost accounting in cents.
-   - `codepulse_analysis_duration_seconds`: Provides fine-grained per-phase latency tracking (`fetch`, `ast`, `llm`, `aggregate`, `post`) to power the Phase 8 Grafana Pipeline Performance breakdown without colliding with `codepulse_pipeline_duration_seconds` (which tracks overall run duration by terminal status).
 3. **Mock Data Provenance:**
    - `codepulse_github_api_rate_limit_remaining`: Under mock mode (`MOCK_GITHUB=true`), returns a static quota value of `4990` generated by `MockGitHubPoster` and `MockDiffFetcher` simulating an active GitHub App installation token. In production, this value is extracted dynamically from the HTTP response header `x-ratelimit-remaining`.
    - Mock Installation IDs (`12345`, `54321`, `99101`): Test fixtures defined in webhook generator scripts to simulate GitHub App installation contexts for repositories `corp-healthy/repo-alpha` and `corp-healthy/repo-beta`. Documented as test fixtures.

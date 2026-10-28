@@ -593,4 +593,23 @@ class TestPhase7aWorkerLogPrivacy:
             delay = get_retry_delay(backoffs, retry_count=1)
             assert delay == 1
 
+    def test_record_dead_letter_increments_metric_by_exactly_one(self, db_session: Session) -> None:
+        """record_dead_letter must increment DEAD_LETTER_TOTAL by exactly 1 per entry, never double-incrementing."""
+        from codepulse.metrics.registry import DEAD_LETTER_TOTAL
+        from codepulse.worker.tasks import record_dead_letter
+        task_name = "tasks.post_review_to_github"
+        initial_val = DEAD_LETTER_TOTAL.labels(task_name=task_name)._value.get()
+
+        record_dead_letter(
+            task_name=task_name,
+            task_id=str(uuid.uuid4()),
+            task_args={"test": "data"},
+            exc=RuntimeError("Simulated error"),
+            retry_count=5,
+        )
+
+        after_val = DEAD_LETTER_TOTAL.labels(task_name=task_name)._value.get()
+        assert after_val == initial_val + 1
+
+
 

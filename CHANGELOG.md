@@ -32,7 +32,7 @@ All notable changes to CodePulse AI are documented here.
   - Refactored `MOCK_LLM_FAILURE` in `tasks.py` to raise within the execution block and call `record_failure()`, properly exercising the real 5-failure sliding window counter rather than short-circuiting the breaker state.
 - **Follow-Up Re-analysis Primary Review ID Preservation**:
   - Ensured follow-up reviews store their GitHub review ID in Redis (`reanalysis:review_id:{run.id}`) and never overwrite the primary review's `analysis_runs.github_review_id`.
-- **16 unit & integration tests** (`tests/test_logging.py`, `tests/test_phase7b.py`). Total test suite: **364 tests**.
+- **17 unit & integration tests** (`tests/test_logging.py`, `tests/test_phase7b.py`, `tests/test_phase7a.py`). Total test suite: **365 tests**.
 
 ## [Phase 8a-i] — Metrics, Prometheus, and Grafana Dashboards
 

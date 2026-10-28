@@ -1089,7 +1089,6 @@ def post_review_to_github(self: Any, data: dict[str, Any]) -> dict[str, Any]:
                 exc=exc,
                 retry_count=retries,
             )
-            record_dead_letter_metric("tasks.post_review_to_github")
             data["github_review_id"] = None
             data["review_posted_at"] = None
             data["posting_error"] = str(exc)
@@ -1146,7 +1145,6 @@ def post_review_to_github(self: Any, data: dict[str, Any]) -> dict[str, Any]:
                 exc=exc,
                 retry_count=retries,
             )
-            record_dead_letter_metric("tasks.post_review_to_github")
             data["github_review_id"] = None
             data["review_posted_at"] = None
             data["posting_error"] = str(exc)

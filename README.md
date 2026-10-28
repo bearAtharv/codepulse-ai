@@ -352,7 +352,7 @@ The `analysis_runs` table has a unique constraint on `(repository_id, pull_reque
   - Grafana Alloy v1.21.2 collector discovering local Docker containers via `/var/run/docker.sock`, parsing JSON log entries, extracting low-cardinality structured labels (`service`, `level`, `container`), and shipping batches to Loki.
   - `trace_id` is excluded from index labels to prevent high-cardinality stream explosion; queries filter via LogQL JSON parsing (`| json | trace_id = "..."`).
   - Provisioned Grafana Loki datasource (`LOKI_DEFAULT`) and `Application Logs` dashboard (`application-logs`).
-- **16 unit & integration tests** (`tests/test_logging.py`, `tests/test_phase7b.py`). Total test suite: **364 tests**.
+- **17 unit & integration tests** (`tests/test_logging.py`, `tests/test_phase7b.py`, `tests/test_phase7a.py`). Total test suite: **365 tests**.
 
 ---
 
@@ -464,7 +464,7 @@ tests/
 ├── test_llm_engine.py        # Phase 4 + Slice 6: 54 LLM engine tests (parameterized)
 ├── test_aggregation.py       # Phase 5: 34 aggregation, dedup, line mapping & posting tests
 ├── test_phase6a.py           # Phase 6a: 51 diff fetcher, preprocessor & persistence tests
-├── test_phase7a.py           # Phase 7a: 12 reference-passing, retry & DLQ tests
+├── test_phase7a.py           # Phase 7a: 13 reference-passing, retry & DLQ tests
 ├── test_phase7b.py           # Phase 7b: 28 rate limit, circuit breaker, cache & degradation tests
 ├── test_metrics.py           # Phase 8a-i: 14 metric registration, label limiter & export tests
 ├── test_logging.py           # Phase 8a-ii: 15 structured logging, redaction & trace ID tests
