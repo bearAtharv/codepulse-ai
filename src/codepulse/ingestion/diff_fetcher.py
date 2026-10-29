@@ -297,6 +297,7 @@ class GitHubDiffFetcher(BaseDiffFetcher):
         token_ttl: int = 3300,
         file_cache_ttl: int = 86400,
         timeout: float = 30.0,
+        transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.app_id = app_id
         self.private_key_path = private_key_path
@@ -307,6 +308,24 @@ class GitHubDiffFetcher(BaseDiffFetcher):
         self.token_ttl = token_ttl
         self.file_cache_ttl = file_cache_ttl
         self.timeout = timeout
+        self.transport = transport
+        self.last_rate_limit_remaining: int | None = None
+        self.last_rate_limit_reset: int | None = None
+
+    def _get_client(self) -> httpx.Client:
+        return httpx.Client(timeout=self.timeout, transport=self.transport)
+
+    def _update_rate_limit(self, response: httpx.Response) -> None:
+        if "x-ratelimit-remaining" in response.headers:
+            try:
+                self.last_rate_limit_remaining = int(response.headers["x-ratelimit-remaining"])
+            except ValueError:
+                pass
+        if "x-ratelimit-reset" in response.headers:
+            try:
+                self.last_rate_limit_reset = int(response.headers["x-ratelimit-reset"])
+            except ValueError:
+                pass
 
     def _load_private_key(self) -> bytes:
         if self.private_key_pem is not None:
@@ -343,8 +362,9 @@ class GitHubDiffFetcher(BaseDiffFetcher):
             "X-GitHub-Api-Version": "2022-11-28",
         }
 
-        with httpx.Client(timeout=self.timeout) as client:
+        with self._get_client() as client:
             response = client.post(url, headers=headers)
+            self._update_rate_limit(response)
             response.raise_for_status()
             token: str = response.json()["token"]
 
@@ -380,7 +400,7 @@ class GitHubDiffFetcher(BaseDiffFetcher):
         page = 1
         per_page = 100
 
-        with httpx.Client(timeout=self.timeout) as client:
+        with self._get_client() as client:
             while True:
                 url = f"{self.base_url}/repos/{owner}/{repo}/pulls/{pull_number}/files"
                 response = client.get(
@@ -388,6 +408,7 @@ class GitHubDiffFetcher(BaseDiffFetcher):
                     headers=headers,
                     params={"per_page": per_page, "page": page},
                 )
+                self._update_rate_limit(response)
                 response.raise_for_status()
                 items = response.json()
                 if not items:
@@ -433,8 +454,9 @@ class GitHubDiffFetcher(BaseDiffFetcher):
         headers = self._build_headers(installation_id)
         url = f"{self.base_url}/repos/{owner}/{repo}/contents/{path}"
 
-        with httpx.Client(timeout=self.timeout) as client:
+        with self._get_client() as client:
             response = client.get(url, headers=headers, params={"ref": ref})
+            self._update_rate_limit(response)
             if response.status_code == 404:
                 return None
             response.raise_for_status()

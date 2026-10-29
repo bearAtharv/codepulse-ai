@@ -41,6 +41,11 @@ class BaseLLMClient(ABC):
         """Send a prompt and return a structured LLM response."""
         ...
 
+    @abstractmethod
+    def verify_model_availability(self, model: str | None = None) -> bool:
+        """Verify that the specified Gemini model is available to this client."""
+        ...
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # Real Gemini Client
@@ -59,6 +64,16 @@ class GeminiClient(BaseLLMClient):
         self._genai_client = genai.Client(api_key=api_key)
         self._default_model = default_model
 
+    def verify_model_availability(self, model: str | None = None) -> bool:
+        """Verify model availability using the models API."""
+        use_model = model or self._default_model
+        try:
+            m = self._genai_client.models.get(model=use_model)
+            return m is not None
+        except Exception as exc:
+            logger.warning("Model availability check failed for %s: %s", use_model, exc)
+            return False
+
     def analyze(
         self,
         system_instruction: str,
@@ -66,28 +81,60 @@ class GeminiClient(BaseLLMClient):
         *,
         model: str | None = None,
     ) -> LLMResponse:
-        from google.genai import types
+        from google.genai import types, errors
 
         use_model = model or self._default_model
 
-        response = self._genai_client.models.generate_content(
-            model=use_model,
-            contents=user_message,
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                response_mime_type="application/json",
-                response_schema=LLMResponse,
-                temperature=0.1,  # Low temperature for deterministic analysis
-            ),
-        )
+        try:
+            response = self._genai_client.models.generate_content(
+                model=use_model,
+                contents=user_message,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_instruction,
+                    response_mime_type="application/json",
+                    response_schema=LLMResponse,
+                    temperature=0.1,  # Low temperature for deterministic analysis
+                    tools=None,       # Explicitly no tools (§3.4.7 defense #5)
+                ),
+            )
+        except errors.APIError as api_err:
+            code = getattr(api_err, "code", None) or getattr(api_err, "status_code", None)
+            is_retryable = code in (429, 500, 502, 503, 504)
+            logger.error(
+                "Gemini API error (code=%s, retryable=%s): %s",
+                code,
+                is_retryable,
+                api_err,
+            )
+            raise
 
-        # Parse the structured JSON response
-        raw_text = response.text
-        data = json.loads(raw_text)
-        parsed = LLMResponse.model_validate(data)
+        # Check safety blocks
+        candidates = getattr(response, "candidates", None) or []
+        if candidates:
+            finish_reason = getattr(candidates[0], "finish_reason", None)
+            finish_reason_str = str(finish_reason).upper()
+            if "SAFETY" in finish_reason_str or "BLOCK" in finish_reason_str:
+                logger.warning("Gemini API candidate finish_reason indicates safety block: %s", finish_reason)
+                raise RuntimeError(f"Gemini response blocked by safety filters: {finish_reason}")
 
-        # Populate token usage from the API response if available
-        if response.usage_metadata:
+        raw_text = getattr(response, "text", None)
+        if not raw_text:
+            raise RuntimeError("Gemini API returned an empty text response (potential safety block or filter)")
+
+        try:
+            data = json.loads(raw_text)
+        except json.JSONDecodeError as exc:
+            logger.error("Failed to parse Gemini response as JSON: %s. Raw text: %s", exc, raw_text)
+            raise ValueError(f"Malformed or truncated JSON response from Gemini API: {exc}") from exc
+
+        try:
+            parsed = LLMResponse.model_validate(data)
+        except Exception as exc:
+            logger.error("Gemini JSON response failed schema validation: %s", exc)
+            raise ValueError(f"Invalid schema in Gemini API response: {exc}") from exc
+
+        # Populate token usage from API response metadata
+        if getattr(response, "usage_metadata", None):
             parsed.metadata.token_usage = LLMTokenUsage(
                 input=response.usage_metadata.prompt_token_count or 0,
                 output=response.usage_metadata.candidates_token_count or 0,
@@ -288,6 +335,11 @@ class MockLLMClient(BaseLLMClient):
                 ),
             ),
         )
+
+    def verify_model_availability(self, model: str | None = None) -> bool:
+        """Verify model availability in mock client."""
+        use_model = model or "gemini-3.7-flash"
+        return use_model in ("gemini-3.7-flash", "gemini-2.5-pro")
 
 
 # ── Factory ────────────────────────────────────────────────────────────

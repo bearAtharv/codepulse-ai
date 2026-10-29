@@ -178,10 +178,15 @@ class GitHubPoster(BaseGitHubPoster):
         token: str | None = None,
         base_url: str = "https://api.github.com",
         timeout: float = 30.0,
+        transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.token = token
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.transport = transport
+
+    def _get_client(self) -> httpx.Client:
+        return httpx.Client(timeout=self.timeout, transport=self.transport)
 
     def post_review(
         self,
@@ -212,8 +217,27 @@ class GitHubPoster(BaseGitHubPoster):
             len(data.get("comments", [])),
         )
 
-        with httpx.Client(timeout=self.timeout) as client:
+        with self._get_client() as client:
             response = client.post(url, json=data, headers=headers)
+            if response.status_code == 422 and data.get("comments"):
+                logger.warning(
+                    "GitHub Review API returned 422 Unprocessable Entity for %s#%d. "
+                    "Logging payload and attempting Branch F fallback (summary only, no inline comments). Response: %s",
+                    f"{owner}/{repo}",
+                    pull_number,
+                    response.text,
+                )
+                summary_only_data = {
+                    "event": data.get("event", "COMMENT"),
+                    "body": data.get("body", ""),
+                    "comments": [],
+                }
+                if "commit_id" in data:
+                    summary_only_data["commit_id"] = data["commit_id"]
+                fallback_resp = client.post(url, json=summary_only_data, headers=headers)
+                fallback_resp.raise_for_status()
+                return fallback_resp.json()
+
             response.raise_for_status()
             return response.json()
 
