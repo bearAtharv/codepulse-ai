@@ -99,11 +99,16 @@ FINDINGS_TOTAL = Counter(
     ["severity", "category", "source"],
 )
 
-# 6. LLM cache effectiveness
+# 6. LLM cache effectiveness (raw counters for recording-rule aggregation across workers)
+LLM_CACHE_REQUESTS_TOTAL = Counter(
+    "codepulse_llm_cache_requests_total",
+    "Total LLM cache requests by status (hit/miss)",
+    ["status"],
+)
 LLM_CACHE_HIT_RATIO = Gauge(
     "codepulse_llm_cache_hit_ratio",
     "LLM cache hit ratio (0.0 to 1.0)",
-    multiprocess_mode="mostrecent",
+    registry=None,
 )
 
 # 7. LLM cost tracking & tokens
@@ -268,6 +273,9 @@ def record_llm_telemetry(
     # Cost calculation: Gemini 3.7 Flash pricing ($0.075 / 1M input tokens, $0.30 / 1M output tokens)
     cost_cents = (input_tokens * 0.000075 + output_tokens * 0.00030) * 100
     LLM_COST_CENTS_TOTAL.labels(model=model).inc(cost_cents)
+
+    status_str = "hit" if cache_hit else "miss"
+    LLM_CACHE_REQUESTS_TOTAL.labels(status=status_str).inc()
 
     with _cache_lock:
         _cache_total += 1

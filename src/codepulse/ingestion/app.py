@@ -16,6 +16,7 @@ from codepulse.observability import (
     parse_traceparent,
     trace_scope,
 )
+from codepulse.config import get_settings, validate_settings
 from codepulse.metrics.server import start_metrics_server
 from codepulse.persistence.database import get_engine, get_redis_client
 from codepulse.ingestion.admin import router as admin_router
@@ -27,8 +28,9 @@ configure_logging(service_name="codepulse-web")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Start internal metrics server on isolated port 9090."""
+    """Start internal metrics server on isolated port 9090 and validate configuration."""
     import sys
+    validate_settings(get_settings())
     metrics_port = int(os.environ.get("METRICS_PORT", "9090"))
     metrics_server = None
     if os.environ.get("TEST_ENV", "").lower() not in ("true", "1") and "pytest" not in sys.modules:

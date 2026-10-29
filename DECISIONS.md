@@ -343,9 +343,12 @@ However, Section 6.4 specifies that *"a `reanalysis_needed` flag is set on the `
    - If 3 attempts fail or produce no changes, `reanalysis_needed` is set to `false` and an explanatory error message is recorded.
 3. **Commit Supersession Check:**
    - Before re-analyzing, the task verifies the PR's current head SHA against `AnalysisRun.head_sha`. If new commits were pushed to the PR in the interim, re-analysis is skipped and marked `reanalysis_needed = false` because the subsequent commit's analysis run supersedes it.
-4. **Degraded Mode Disclaimer:**
-   - When LLM analysis fails or the Gemini circuit breaker is open, the initial PR review is composed in degraded mode (AST heuristics only). The review body includes the following markdown disclaimer verbatim from §6.4:
+4. **Degraded Mode Disclaimer (§6.4 Spec vs. Implementation):**
+   - **Exact Spec Text:** Section 6.4 of `codepulse_ai_architecture.md` specifies the exact degraded notification note verbatim:
+     `"LLM analysis unavailable; AST-only results shown. Re-analysis will be triggered automatically when the service recovers."`
+   - **Implementation Formatting:** As a visual presentation enhancement, CodePulse formats this note as a GitHub Markdown blockquote with a warning icon:
      `> ⚠️ **Degraded Mode:** LLM analysis unavailable; AST-only results shown. Re-analysis will be triggered automatically when the service recovers.`
+   - **Architectural Judgment Call:** Degrading to AST-only when the rate-limit wait deadline is exceeded (DEC-015) is an intentional architectural judgment call that extends §6.4 beyond the explicit "Gemini API fully down" failure mode, preventing permanent worker stalls during severe API throttling.
 5. **Rate Limiting (Token Bucket via Redis Lua):**
    - Configured for 324 RPM (360 RPM provisioned minus 10% safety margin per §3.4.6 and §11) with a burst capacity of 10 tokens.
    - Implemented as an atomic Redis Lua script. When tokens are unavailable, the script calculates and returns the exact seconds until a token is granted. The task reschedules itself via `raise self.retry(countdown=wait_seconds)` without blocking Celery worker threads.
@@ -525,7 +528,7 @@ Reviewing these requirements against production realities and upstream ecosystem
      - *Upstream Image Rebuild Notice:* The Alpine 3.20 base image for Redis was rebuilt on October 26, 2026 to incorporate upstream security patches, resulting in a refreshed image ID and digest. The new build was verified against Kombu/Celery broker operations, the Lua token-bucket rate limiter, and Redis circuit breaker persistence.
    - **Prometheus (`prom/prometheus:v3.15.1`):** Pinned to `prom/prometheus:v3.15.1@sha256:fa3302279710be2f21a8301ec17a8b4f2301fd829bd113839b3b6b02b6f191a2`. Official release: v3.15.1 (October 21, 2026, `https://github.com/prometheus/prometheus/releases/tag/v3.15.1`).
    - **Grafana (`grafana/grafana:13.3.0`):** Pinned to `grafana/grafana:13.3.0@sha256:488984b716c0862639f91a698adbe2862677a5a07bad42da5f03f3030883b205`. Official release: 13.3.0 (October 27, 2026, `https://github.com/grafana/grafana/releases/tag/v13.3.0`).
-     - *Risk Assessment & Mitigation:* Released on October 27, 2026. Upstream regression tracked in GitHub Issue #136271 (`https://github.com/grafana/grafana/issues/136271`: "Dashboards: browse view's quota check returns 501 and logs an error on every page load (OSS 13.3.0)"). Mitigated in local Compose provisioning via file-based dashboard mounting (`/etc/grafana/provisioning/dashboards`) with empty overrides. Datasource health (`PBFA97CFB590B2093`, `LOKI_DEFAULT`) and dashboard rendering verified. Tracked for validation prior to Phase 8b production migration.
+     - *Risk Assessment & Mitigation:* Released on October 27, 2026. Upstream regression tracked in GitHub Issue #136271 (`https://github.com/grafana/grafana/issues/136271`: "Dashboards: browse view's quota check returns 501 and logs an error on every page load (OSS 13.3.0)"). Mitigated in local Compose provisioning by mounting `deploy/grafana/overrides.yaml` (containing `overrides: {}`) to `/etc/grafana/overrides.yaml` and configuring `GF_UNIFIED_STORAGE_OVERRIDES_PATH=/etc/grafana/overrides.yaml`, which stops the 501 browse-view quota error. Datasource health (`PBFA97CFB590B2093`, `LOKI_DEFAULT`) and dashboard rendering verified. Tracked for validation prior to Phase 8b production migration.
    - **Loki (`grafana/loki:3.7.9`):** Pinned to `grafana/loki:3.7.9@sha256:0db216b630ae1f348a1584c67f3cead8b4c1fc839169a39501db664744158e28`. Official release: 3.7.9 (October 20, 2026, `https://github.com/grafana/loki/releases/tag/v3.7.9`).
    - **Alloy (`grafana/alloy:v1.21.2`):** Pinned to `grafana/alloy:v1.21.2@sha256:89a5a320168387336b9ac3c850609c3ba7757eadd4ae5f1d819deb35e9854b18`. Official release: v1.21.2 (October 22, 2026, `https://github.com/grafana/alloy/releases/tag/v1.21.2`).
 
@@ -539,10 +542,11 @@ Reviewing these requirements against production realities and upstream ecosystem
    - On May 1, 2025, Redis Ltd announced Redis 8 GA with a tri-license model: AGPLv3 (OSI-approved copyleft), RSALv2, and SSPLv1 (`https://redis.io/legal/licenses/`, `https://redis.io/blog/redis-adopts-dual-source-available-licensing/`).
    - Redis 7.2 is the final release line under the permissive 3-Clause BSD license.
 2. **Support Lifecycle:**
-   - Redis 7.2 active bugfix support concluded on July 29, 2024, and extended security maintenance continues through December 1, 2029 (documented at `https://endoflife.date/redis` and `https://endoflife.date/api/redis.json`: cycle 7.2, eol: 2029-12-01; see also official lifecycle policy at `https://redis.io/docs/latest/operate/rs/lifecycle-and-support/`).
+   - Redis 7.2 upstream security policy (`https://github.com/redis/redis/blob/7.2/SECURITY.md`) commits to backporting security fixes across supported active branches without specifying a contractual multi-year EOL date. While third-party aggregators (e.g. `endoflife.date/api/redis.json`) list an EOL date of `2029-12-01`, this date represents enterprise/vendor support commitments (e.g. Redis Enterprise per `https://redis.io/docs/latest/operate/rs/lifecycle-and-support/`) and is officially **unverified** for Open Source Redis 7.2.
 3. **Architecture Decision:**
-   - CodePulse maintains `redis:7.2.17-alpine` under BSD-3 to avoid AGPLv3 copyleft network-distribution obligations (Section 13) in enterprise deployments.
-   - Kombu/Celery broker compatibility, Lua atomic token-bucket execution, and circuit breaker operations are verified and fully supported on Redis 7.2.17. Any future transition to Redis 8 must be vetted for AGPLv3 compliance.
+   - CodePulse maintains `redis:7.2.17-alpine` under BSD-3 as an architectural preference to favor permissive licensing over copyleft network-distribution obligations in enterprise environments, rather than as a definitive legal conclusion.
+   - Kombu/Celery broker compatibility, Lua atomic token-bucket execution, and circuit breaker operations are verified and fully supported on Redis 7.2.17.
+   - Should upstream security maintenance for Redis 7.2 OSS lapse or future requirements necessitate an actively maintained permissive codebase, **Valkey** (`https://valkey.io/`, BSD-3-Clause under the Linux Foundation) is the designated drop-in open-source alternative.
 
 ## DEC-021: Alloy Container Socket Mount (`/var/run/docker.sock:ro`) as Dev-Only Compose Convenience
 
@@ -550,26 +554,33 @@ Reviewing these requirements against production realities and upstream ecosystem
 
 **Decisions & Specifications:**
 
-1. **Local Compose Convenience:**
+1. **Local Compose Convenience and Security Limitation:**
    - In `docker-compose.yml`, Alloy mounts `/var/run/docker.sock:ro` with `discovery.docker` to discover containers (`codepulse-web`, `codepulse-worker`, `codepulse-beat`) and tail their logs.
-2. **Production Policy (Phase 8b):**
-   - Mounting the Docker or CRI host socket in production Kubernetes environments is prohibited by security policy.
-   - For Phase 8b, Alloy will deploy as a Kubernetes DaemonSet using `local.file_match` to scrape container logs directly from node log paths (`/var/log/pods/*/*/*.log`) without host socket privileges.
+   - *Security Note:* Mounting `/var/run/docker.sock:ro` does NOT protect the host. In Unix domain sockets, `:ro` applies only to filesystem mount metadata; the bi-directional stream protocol of the Docker API allows any client connected to the socket to issue HTTP POST requests (e.g. container creation or host exec), effectively granting full host root access. This configuration is accepted strictly as a local development convenience.
+2. **Production Alternatives (Phase 8b):**
+   - For production environments, mounting the Docker or CRI host socket directly into application pods is prohibited by security policy.
+   - Two approved production architectures are planned:
+     - A restricted Docker socket proxy (such as `tecnativa/docker-socket-proxy`) configured to allow only `GET /containers/json` and `GET /containers/{id}/logs` while strictly blocking all mutating endpoints.
+     - In Kubernetes (Phase 8b), running Alloy as a DaemonSet using `local.file_match` to scrape container logs directly from node log paths (`/var/log/pods/*/*/*.log`) without host socket privileges.
 
-## DEC-022: Local Loopback Port Isolation and Redis Password Authentication
+## DEC-022: Local Loopback Port Isolation, Secrets Hardening, and Startup Validation
 
-**Context:** Hardening network perimeter exposure and securing in-memory cache/broker access in Docker Compose.
+**Context:** Hardening network perimeter exposure, securing database and cache credentials, and preventing insecure default deployments.
 
 **Decisions & Specifications:**
 
 1. **Network Interface Binding:**
-   - `postgres` (port 5432) and `redis` (port 6379) are strictly bound to `127.0.0.1` (`127.0.0.1:5432:5432` and `127.0.0.1:6379:6379`). They are never exposed on `0.0.0.0` or external network adapters.
-   - `web` (port 8000) remains bound to `0.0.0.0:8000` to allow inbound webhook ingress tunnels (e.g. ngrok, smee, cloudflared) during testing.
-2. **Redis Password Authentication:**
+   - All exposed service ports are strictly bound to `127.0.0.1` (`postgres` on `127.0.0.1:5432:5432`, `redis` on `127.0.0.1:6379:6379`, and `web` on `127.0.0.1:8000:8000`). None are exposed on `0.0.0.0` or external network adapters.
+2. **PostgreSQL Password Management:**
+   - The PostgreSQL password is decoupled from hardcoded configuration and moved into `.env` via `${POSTGRES_PASSWORD:-codepulse_dev}`. `.env.example` provides a clear template (`POSTGRES_PASSWORD=your_secure_postgres_password_here`).
+3. **Redis Password Authentication:**
    - Redis enforces `--requirepass "${REDIS_PASSWORD}"`.
    - `.env.example` provides a non-secret developer placeholder (`REDIS_PASSWORD=change_me_redis_password_dev`).
    - The real password is kept exclusively in the untracked `.env` file.
-   - Celery broker (`CELERY_BROKER_URL`), Celery backend (`CELERY_RESULT_BACKEND`), rate limiter, circuit breaker, and payload cache connect via authenticated `redis://:${REDIS_PASSWORD}@...` URLs.
+4. **Startup Security Validation:**
+   - In `codepulse.config.validate_settings`, application startup is validated during the FastAPI lifespan hook:
+     - Refuses startup if `MOCK_GITHUB=false` or `ENVIRONMENT != development` while default placeholder values for `GITHUB_WEBHOOK_SECRET`, `ADMIN_API_KEY`, or `POSTGRES_PASSWORD` (`codepulse_dev`) are present.
+     - Refuses startup if `MOCK_LLM=false` and `GEMINI_API_KEY` is missing, empty, or placeholder.
 
 ## DEC-023: Supplementary Observability Metrics Justification and Mock Data Provenance
 
@@ -577,9 +588,11 @@ Reviewing these requirements against production realities and upstream ecosystem
 
 **Decisions & Specifications:**
 
-1. **Canonical §9.2 Metrics:**
+1. **Canonical §9.2 Metrics & Implementation Scope:**
    - All 13 canonical §9.2 metrics defined in `codepulse_ai_architecture.md` are registered, scraped, and verified in Prometheus:
      `codepulse_webhooks_received_total`, `codepulse_analysis_runs_total`, `codepulse_analysis_duration_seconds`, `codepulse_end_to_end_duration_seconds`, `codepulse_findings_total`, `codepulse_llm_cache_hit_ratio`, `codepulse_llm_tokens_consumed_total`, `codepulse_llm_latency_seconds`, `codepulse_github_api_calls_total`, `codepulse_github_api_rate_limit_remaining`, `codepulse_circuit_breaker_state`, `codepulse_dead_letter_total`, and `codepulse_chunks_per_analysis`.
+   - **Circuit Breaker Scope:** `codepulse_circuit_breaker_state` is implemented exclusively for `api="gemini"`. Per §6.4 and §10.2, GitHub API resilience does not use a circuit breaker; instead, GitHub operations use Celery exponential backoff retries and the dead-letter log (`dead_letter_log`). A GitHub circuit breaker is explicitly not implemented.
+   - **Cache Hit Ratio Prometheus Recording Rule:** To resolve multiprocess gauge inconsistencies across Celery prefork worker processes, Celery workers increment raw counters `codepulse_llm_cache_requests_total{status="hit|miss"}`. Prometheus evaluates a recording rule in `recording_rules.yml` to compute the canonical global metric `codepulse_llm_cache_hit_ratio`, guaranteeing accurate fleet-wide aggregation.
 2. **Supplementary Metrics Justification:**
    - `codepulse_pipeline_duration_seconds`: Overall pipeline duration by completion status used for the p99 latency recording rule and summary dashboards.
    - `codepulse_rate_limit_wait_seconds`: Tracks cumulative seconds tasks are delayed due to rate limiting.

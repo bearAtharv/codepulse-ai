@@ -528,6 +528,7 @@ def preprocess_and_chunk(self: Any, data: dict[str, Any]) -> dict[str, Any]:
     for chunk in result.chunks:
         chunk_dict = chunk.to_dict()
         chunk_dict["trace_id"] = active_trace_id
+        chunk_dict["repository"] = repo_full_name
         header.append(analyze_ast_task.s(chunk_dict).set(headers=task_headers))
 
     for batch in result.llm_batches:
@@ -603,7 +604,8 @@ def analyze_ast_task(self: Any, chunk_data: dict[str, Any]) -> dict[str, Any]:
             raise
 
     unified_findings = [Finding.from_ast_finding(f).to_dict() for f in findings]
-    record_analysis_phase_duration("ast", max(0.001, time.time() - start_ts))
+    repo_name = chunk_data.get("repository") or "unknown"
+    record_analysis_phase_duration("ast", max(0.001, time.time() - start_ts), repository=repo_name)
     logger.info(
         "analyze_ast completed: %s (%d findings)",
         chunk.file_path,
@@ -660,6 +662,7 @@ def analyze_llm_task(
                 len(cached_findings),
             )
             record_llm_telemetry(cached_model, 0, 0, 0, cache_hit=True)
+            record_analysis_phase_duration("llm", max(0.001, time.time() - start_ts), repository=repo_name)
             return {
                 "type": "llm",
                 "findings": cached_findings,
@@ -755,6 +758,10 @@ def analyze_llm_task(
             "llm_degraded": True,
             "error": "Circuit breaker OPEN",
         }
+    elif breaker_state == "HALF_OPEN":
+        record_circuit_breaker("gemini", 0.5)
+    else:
+        record_circuit_breaker("gemini", 0.0)
 
     # 4. Invoke LLM Analysis
     start_time = time.perf_counter()
@@ -764,10 +771,17 @@ def analyze_llm_task(
             raise RuntimeError("Simulated Gemini API failure (injected)")
         llm_result = analyze_llm(diff_chunks, repo_name, language)
         breaker.record_success()
+        record_circuit_breaker("gemini", 0.0)
     except (Retry, Ignore):
         raise
     except Exception as exc:
-        breaker.record_failure()
+        new_state = breaker.record_failure()
+        if new_state == "OPEN":
+            record_circuit_breaker("gemini", 1.0)
+        elif new_state == "HALF_OPEN":
+            record_circuit_breaker("gemini", 0.5)
+        else:
+            record_circuit_breaker("gemini", 0.0)
         if not is_direct and failure_retries < 3:
             delay = get_retry_delay(ANALYZE_LLM_BACKOFF, failure_retries)
             logger.warning(

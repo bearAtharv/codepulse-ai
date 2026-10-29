@@ -300,7 +300,7 @@ The `analysis_runs` table has a unique constraint on `(repository_id, pull_reque
 ### Phase 7b — Rate Limiting, Caching, Circuit Breaker & Graceful Degradation
 
 - **Gemini Rate Limiter** (`src/codepulse/analysis/rate_limiter.py`): Distributed sliding token bucket via atomic Redis Lua script enforcing 324 RPM (360 RPM - 10% safety margin per §3.4.6, §11) with burst 10 tokens. Reschedules tasks with exact countdown without worker blocking.
-- **Circuit Breaker** (`src/codepulse/analysis/circuit_breaker.py`): 3-state breaker (`CLOSED`, `OPEN`, `HALF_OPEN`) via atomic Redis Lua scripts per §6.3. Trips to `OPEN` on 5 failures within 60s; recovers to `HALF_OPEN` probe after 30s.
+- **Circuit Breaker** (`src/codepulse/analysis/circuit_breaker.py`): 3-state breaker (`CLOSED`, `OPEN`, `HALF_OPEN`) via atomic Redis Lua scripts per §6.3. Implemented exclusively for Gemini API (`api="gemini"`). Trips to `OPEN` on 5 failures within 60s; recovers to `HALF_OPEN` probe after 30s. *Note:* Per §6.4 and §10.2, GitHub API resilience does NOT use a circuit breaker; it is handled via Celery retries and the dead-letter log (a GitHub circuit breaker is explicitly not implemented).
 - **LLM Response Caching** (`src/codepulse/worker/tasks.py`): Response cache keyed by `llm_cache:{sha256(version:model_id:prompt_text)}` with 24-hour TTL (§3.4.5, §3.7.2). Hits recorded as `cache_hit=True` with zero token consumption.
 - **Graceful Degradation & Re-analysis** (`src/codepulse/aggregation/summary.py`, `src/codepulse/worker/tasks.py`):
   - When LLM analysis is unavailable, reviews post in degraded mode (AST-only) with disclaimer alert (§6.4) and `reanalysis_needed=True`.
@@ -349,7 +349,8 @@ The `analysis_runs` table has a unique constraint on `(repository_id, pull_reque
   - Pinned all six external container images by exact immutable SHA-256 digest (`postgres:16.15-alpine`, `redis:7.2.17-alpine`, `prom/prometheus:v3.15.1`, `grafana/grafana:13.3.0`, `grafana/loki:3.7.9`, `grafana/alloy:v1.21.2`).
 - **Loki & Grafana Alloy Telemetry Pipeline** (`deploy/loki/`, `deploy/alloy/`, `docker-compose.yml`):
   - Grafana Loki 3.7.9 configured with single-binary TSDB v13 schema and filesystem chunk storage on `127.0.0.1:3100`.
-  - Grafana Alloy v1.21.2 collector discovering local Docker containers via `/var/run/docker.sock`, parsing JSON log entries, extracting low-cardinality structured labels (`service`, `level`, `container`), and shipping batches to Loki.
+  - Grafana Alloy v1.21.2 collector discovering local Docker containers via `/var/run/docker.sock:ro`, parsing JSON log entries, extracting low-cardinality structured labels (`service`, `level`, `container`), and shipping batches to Loki.
+  - *Security Warning:* Mounting `/var/run/docker.sock:ro` does NOT protect the host (the Docker API stream protocol allows mutating POST/exec commands granting effective host root access); this is accepted solely as a local Compose development convenience. Production deployments must use DaemonSets scraping node logs (`/var/log/pods`) or a restricted read-only socket proxy (`tecnativa/docker-socket-proxy`).
   - `trace_id` is excluded from index labels to prevent high-cardinality stream explosion; queries filter via LogQL JSON parsing (`| json | trace_id = "..."`).
   - Provisioned Grafana Loki datasource (`LOKI_DEFAULT`) and `Application Logs` dashboard (`application-logs`).
 - **17 unit & integration tests** (`tests/test_logging.py`, `tests/test_phase7b.py`, `tests/test_phase7a.py`). Total test suite: **365 tests**.

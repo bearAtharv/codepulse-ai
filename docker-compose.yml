@@ -3,7 +3,7 @@ services:
     image: postgres:16.15-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
     environment:
       POSTGRES_USER: codepulse
-      POSTGRES_PASSWORD: codepulse_dev
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-codepulse_dev}"
       POSTGRES_DB: codepulse
     ports:
       - "127.0.0.1:5432:5432"
@@ -36,7 +36,7 @@ services:
       dockerfile: Dockerfile
     command: ["alembic", "upgrade", "head"]
     environment:
-      DATABASE_URL: "postgresql://codepulse:codepulse_dev@postgres:5432/codepulse"
+      DATABASE_URL: "postgresql://codepulse:${POSTGRES_PASSWORD:-codepulse_dev}@postgres:5432/codepulse"
       REDIS_URL: "redis://:${REDIS_PASSWORD}@redis:6379/0"
       GITHUB_WEBHOOK_SECRET: "dev_webhook_secret_not_for_production"
     depends_on:
@@ -51,9 +51,9 @@ services:
       dockerfile: Dockerfile
     command: ["uvicorn", "codepulse.ingestion.app:app", "--host", "0.0.0.0", "--port", "8000"]
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     environment:
-      DATABASE_URL: "postgresql://codepulse:codepulse_dev@postgres:5432/codepulse"
+      DATABASE_URL: "postgresql://codepulse:${POSTGRES_PASSWORD:-codepulse_dev}@postgres:5432/codepulse"
       REDIS_URL: "redis://:${REDIS_PASSWORD}@redis:6379/0"
       CELERY_BROKER_URL: "redis://:${REDIS_PASSWORD}@redis:6379/0"
       CELERY_RESULT_BACKEND: "redis://:${REDIS_PASSWORD}@redis:6379/0"
@@ -83,7 +83,7 @@ services:
       dockerfile: Dockerfile
     command: ["celery", "-A", "codepulse.worker.celery_app", "worker", "-l", "info", "-Q", "cp-high,cp-analysis,cp-aggregate,cp-retry", "-c", "4"]
     environment:
-      DATABASE_URL: "postgresql://codepulse:codepulse_dev@postgres:5432/codepulse"
+      DATABASE_URL: "postgresql://codepulse:${POSTGRES_PASSWORD:-codepulse_dev}@postgres:5432/codepulse"
       REDIS_URL: "redis://:${REDIS_PASSWORD}@redis:6379/0"
       CELERY_BROKER_URL: "redis://:${REDIS_PASSWORD}@redis:6379/0"
       CELERY_RESULT_BACKEND: "redis://:${REDIS_PASSWORD}@redis:6379/0"
@@ -118,7 +118,7 @@ services:
       dockerfile: Dockerfile
     command: ["celery", "-A", "codepulse.worker.celery_app", "beat", "-l", "info"]
     environment:
-      DATABASE_URL: "postgresql://codepulse:codepulse_dev@postgres:5432/codepulse"
+      DATABASE_URL: "postgresql://codepulse:${POSTGRES_PASSWORD:-codepulse_dev}@postgres:5432/codepulse"
       REDIS_URL: "redis://:${REDIS_PASSWORD}@redis:6379/0"
       CELERY_BROKER_URL: "redis://:${REDIS_PASSWORD}@redis:6379/0"
       CELERY_RESULT_BACKEND: "redis://:${REDIS_PASSWORD}@redis:6379/0"
@@ -170,8 +170,10 @@ services:
       GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD}"
       GF_AUTH_ANONYMOUS_ENABLED: "false"
       GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_UNIFIED_STORAGE_OVERRIDES_PATH: "/etc/grafana/overrides.yaml"
     volumes:
       - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/overrides.yaml:/etc/grafana/overrides.yaml:ro
       - grafana_data:/var/lib/grafana
     depends_on:
       - prometheus

@@ -3,3 +3,9 @@ groups:
     rules:
       - record: codepulse_analysis_latency_p99
         expr: histogram_quantile(0.99, sum(rate(codepulse_end_to_end_duration_seconds_bucket[5m])) by (le))
+
+      - record: codepulse_llm_cache_hit_ratio
+        expr: >-
+          (sum(codepulse_llm_cache_requests_total{status="hit"}) / clamp_min(sum(codepulse_llm_cache_requests_total), 1))
+          or
+          vector(0)
