@@ -66,6 +66,10 @@ def main() -> int:
         ("diff --git", "diff --git"),
         ("[WEBHOOK_SECRET]", webhook_secret),
         ("[ADMIN_API_KEY]", admin_key),
+        ("BEGIN RSA PRIVATE KEY", "BEGIN RSA PRIVATE KEY"),
+        ("BEGIN PRIVATE KEY", "BEGIN PRIVATE KEY"),
+        ("ghs_", "ghs_"),
+        ("AIza", "AIza"),
     ]
 
     compose_failures = 0

@@ -55,6 +55,7 @@ celery_app.conf.update(
         "tasks.fetch_pr_diff": {"queue": "cp-high"},
         "tasks.post_review_to_github": {"queue": "cp-high"},
         "tasks.scan_reanalysis_needed": {"queue": "cp-high"},
+        "tasks.scan_unposted_reviews": {"queue": "cp-high"},
         "tasks.drain_pending_persistence_task": {"queue": "cp-high"},
         "tasks.analyze_ast": {"queue": "cp-analysis"},
         "tasks.analyze_llm": {"queue": "cp-analysis"},
@@ -66,6 +67,11 @@ celery_app.conf.update(
         "scan-reanalysis-needed": {
             "task": "tasks.scan_reanalysis_needed",
             "schedule": 300.0,  # every 5 minutes (§6.4)
+            "options": {"queue": "cp-high"},
+        },
+        "scan-unposted-reviews": {
+            "task": "tasks.scan_unposted_reviews",
+            "schedule": 600.0,  # every 10 minutes (§6.4)
             "options": {"queue": "cp-high"},
         },
         "drain-pending-persistence": {

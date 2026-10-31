@@ -95,14 +95,21 @@ MOCK_POSTING_FAILURE=false
 MOCK_QUICK_RETRIES=false
 ```
 
-#### 2. Start the Stack
+#### 2. Run Preflight Dry-Run Check
+Always run the offline preflight verification script before launching containers:
+```bash
+python3 scripts/preflight_live.py
+```
+This dry-run confirms that all required environment variables are set, your GitHub App private key parses as a valid RSA key, secrets adhere to security rules, and confirms `[STAGE 1] Live GitHub App Integration (Mock LLM Client)` without calling external APIs or printing secret values.
+
+#### 3. Start the Stack
 ```bash
 docker compose down -v
 docker compose up -d --build
 docker compose ps
 ```
 
-#### 3. Open Test Pull Request
+#### 4. Open Test Pull Request
 In your test repository:
 1. Create and checkout a test branch:
    ```bash
@@ -169,7 +176,14 @@ GEMINI_RPM_LIMIT=324
 GEMINI_RATE_LIMIT_DEADLINE=60.0
 ```
 
-#### 2. Restart Worker & Web Services
+#### 2. Run Preflight Dry-Run Check
+Verify Stage 2 configuration:
+```bash
+python3 scripts/preflight_live.py
+```
+This confirms `[STAGE 2] Full Live Integration (Live GitHub + Live Gemini API)` and validates `GEMINI_API_KEY` format without calling external APIs.
+
+#### 3. Restart Worker & Web Services
 ```bash
 docker compose restart web worker
 ```
@@ -179,7 +193,7 @@ docker compose logs --tail=30 web
 docker compose logs --tail=30 worker
 ```
 
-#### 3. Push a New Commit to the Pull Request
+#### 4. Push a New Commit to the Pull Request
 On your test branch, add an additional change to trigger a new commit analysis:
 
 ```bash
@@ -196,13 +210,13 @@ git commit -m "test: add command injection pattern for Gemini analysis"
 git push origin test/codepulse-smoke-test-stage1
 ```
 
-#### 4. Verification on GitHub
+#### 5. Verification on GitHub
 Inspect the updated PR in GitHub:
 - A new review comment is posted for the new commit SHA.
 - Findings reflect both AST pattern matches and Gemini semantic reasoning.
 - Explanations and remediations contain model-generated guidance.
 
-#### 5. Verify Gemini Telemetry & Usage Logs
+#### 6. Verify Gemini Telemetry & Usage Logs
 Query the database and Prometheus to verify real token consumption:
 
 ```bash
@@ -215,6 +229,27 @@ curl -s http://127.0.0.1:9092/api/v1/query?query=codepulse_llm_tokens_consumed_t
 
 # Verify circuit breaker is CLOSED (0.0)
 curl -s http://127.0.0.1:9092/api/v1/query?query=codepulse_circuit_breaker_state | jq .
+```
+
+---
+
+### STAGE 3: Periodic Background Sweeps & Resilience (Celery Beat)
+
+CodePulse AI runs scheduled periodic background sweeps on `codepulse-beat` to ensure complete resilience:
+
+1. **Re-analysis of Degraded Runs (§6.4)**:
+   - Task: `tasks.scan_reanalysis_needed` (every 5 minutes / 300s).
+   - When Gemini experiences outages or trips the circuit breaker, runs proceed AST-only with `reanalysis_needed=True`.
+   - Once Gemini recovers (breaker `CLOSED`), Beat triggers `tasks.scan_reanalysis_needed` to re-analyze diffs with LLM, merge confirmed findings, and post a follow-up review comment to GitHub.
+
+2. **Unposted Review Recovery (§6.4, §10.2 Branch F)**:
+   - Task: `tasks.scan_unposted_reviews` (every 10 minutes / 600s).
+   - If GitHub API is down during initial analysis, `post_review_to_github` retries 5 times before durably persisting the review payload in `dead_letter_log` (`task_name=tasks.post_review_to_github`) with `analysis_runs.status='completed'` and `review_posted_at=NULL`.
+   - Every 10 minutes, `scan_unposted_reviews` scans for completed runs older than 15 minutes with `review_posted_at IS NULL`, loads the durable Branch F review payload from `dead_letter_log`, and re-posts the review idempotently to GitHub, updating `review_posted_at`, `github_review_id`, and marking findings `is_posted=True`.
+
+```bash
+# Verify Celery Beat scheduler log firing periodic sweeps
+docker compose logs --tail=50 beat | grep -E "scan-reanalysis-needed|scan-unposted-reviews"
 ```
 
 ---

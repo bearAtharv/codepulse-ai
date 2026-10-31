@@ -15,7 +15,7 @@ from __future__ import annotations
 import os
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -1025,4 +1025,164 @@ class TestComposeAndTaskIsolationFixes:
             res6 = analyze_llm_task([chunk], "org/repo", "python", str(uuid.uuid4()))
             assert res6["llm_degraded"] is True
             assert res6["error"] == "Circuit breaker OPEN"
+
+
+class TestScanUnpostedReviews:
+    """Verifies §6.4 & §10.2 Branch F periodic recovery of unposted reviews older than 15 minutes."""
+
+    @pytest.fixture(autouse=True)
+    def clean_unposted(self, db_session: Session) -> None:
+        """Mark existing runs as posted so tests have clean isolated state."""
+        db_session.query(AnalysisRun).filter(AnalysisRun.review_posted_at.is_(None)).update(
+            {"review_posted_at": datetime.now(timezone.utc)}
+        )
+        db_session.commit()
+
+    def test_scan_unposted_reviews_ignores_recent_runs(
+        self, db_session: Session, test_repo_and_run: tuple[Repository, AnalysisRun]
+    ) -> None:
+        """Runs created within the 15-minute cutoff window are ignored."""
+        from codepulse.worker.tasks import scan_unposted_reviews
+        repo, run = test_repo_and_run
+        run.status = "completed"
+        run.review_posted_at = None
+        run.created_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+        db_session.commit()
+
+        count = scan_unposted_reviews(cutoff_minutes=15)
+        assert count == 0
+        db_session.refresh(run)
+        assert run.review_posted_at is None
+
+    def test_scan_unposted_reviews_reposts_older_unposted_run(
+        self, db_session: Session, test_repo_and_run: tuple[Repository, AnalysisRun]
+    ) -> None:
+        """Completed runs older than 15 minutes with Branch F dead letters are posted idempotently."""
+        from codepulse.models.tables import DeadLetterLog
+        from codepulse.worker.tasks import scan_unposted_reviews
+        repo, run = test_repo_and_run
+        run.status = "completed"
+        run.review_posted_at = None
+        run.head_sha = "1" * 40
+        run.created_at = datetime.now(timezone.utc) - timedelta(minutes=20)
+
+        # Create finding with is_posted=False
+        finding = DBFinding(
+            id=uuid.uuid4(),
+            analysis_run_id=run.id,
+            file_path="src/app.py",
+            line_start=1,
+            line_end=1,
+            severity="critical",
+            category="A03",
+            title="SQLi",
+            explanation="Unsanitized query",
+            remediation="Use params",
+            confidence="high",
+            source="ast",
+            is_posted=False,
+        )
+        db_session.add(finding)
+
+        # Create dead_letter_log row with Branch F payload
+        dl = DeadLetterLog(
+            task_name="tasks.post_review_to_github",
+            task_id=uuid.uuid4(),
+            task_args={
+                "analysis_run_id": str(run.id),
+                "review_payload": {
+                    "event": "COMMENT",
+                    "body": "## Re-posted Review Summary",
+                    "comments": [],
+                },
+            },
+            exception_type="RuntimeError",
+            exception_message="GitHub 503 Service Unavailable",
+            traceback="Traceback...",
+            retry_count=5,
+            resolved=False,
+        )
+        db_session.add(dl)
+        db_session.commit()
+
+        with patch("codepulse.worker.tasks.get_github_poster") as mock_poster_factory:
+            mock_poster = MagicMock()
+            mock_poster.post_review.return_value = {"id": 77665544}
+            mock_poster_factory.return_value = mock_poster
+
+            # Run periodic sweep
+            count = scan_unposted_reviews(cutoff_minutes=15)
+            assert count == 1
+
+            mock_poster.post_review.assert_called_once()
+            args = mock_poster.post_review.call_args[0]
+            assert args[2] == run.pull_request_number
+            assert args[3]["body"] == "## Re-posted Review Summary"
+
+        db_session.expire_all()
+        reloaded_run = db_session.get(AnalysisRun, run.id)
+        assert reloaded_run is not None
+        assert reloaded_run.review_posted_at is not None
+        assert reloaded_run.github_review_id == 77665544
+
+        reloaded_dl = db_session.get(DeadLetterLog, dl.id)
+        assert reloaded_dl is not None
+        assert reloaded_dl.resolved is True
+
+        reloaded_finding = db_session.get(DBFinding, finding.id)
+        assert reloaded_finding is not None
+        assert reloaded_finding.is_posted is True
+
+        # Second sweep must be idempotent and find 0
+        count2 = scan_unposted_reviews(cutoff_minutes=15)
+        assert count2 == 0
+
+    def test_scan_unposted_reviews_skips_when_superseded(
+        self, db_session: Session, test_repo_and_run: tuple[Repository, AnalysisRun]
+    ) -> None:
+        """When PR head SHA has moved, unposted review is marked resolved without posting."""
+        from codepulse.models.tables import DeadLetterLog
+        from codepulse.worker.tasks import scan_unposted_reviews
+        repo, run = test_repo_and_run
+        run.status = "completed"
+        run.review_posted_at = None
+        run.head_sha = "1" * 40
+        run.created_at = datetime.now(timezone.utc) - timedelta(minutes=25)
+
+        dl = DeadLetterLog(
+            task_name="tasks.post_review_to_github",
+            task_id=uuid.uuid4(),
+            task_args={
+                "analysis_run_id": str(run.id),
+                "review_payload": {"event": "COMMENT", "body": "Summary", "comments": []},
+            },
+            exception_type="RuntimeError",
+            exception_message="GitHub timeout",
+            traceback="Traceback...",
+            retry_count=5,
+            resolved=False,
+        )
+        db_session.add(dl)
+        db_session.commit()
+
+        with patch("codepulse.worker.tasks.get_diff_fetcher") as mock_df_factory:
+            mock_df = MagicMock()
+            mock_df.fetch_pr_head_sha.return_value = "2" * 40  # Head SHA moved
+            mock_df_factory.return_value = mock_df
+
+            with patch("codepulse.worker.tasks.get_github_poster") as mock_poster_factory:
+                mock_poster = MagicMock()
+                mock_poster_factory.return_value = mock_poster
+
+                count = scan_unposted_reviews(cutoff_minutes=15)
+                assert count == 0
+                mock_poster.post_review.assert_not_called()
+
+        db_session.expire_all()
+        reloaded_dl = db_session.get(DeadLetterLog, dl.id)
+        assert reloaded_dl is not None
+        assert reloaded_dl.resolved is True
+        reloaded_run = db_session.get(AnalysisRun, run.id)
+        assert reloaded_run is not None
+        assert reloaded_run.review_posted_at is None
 

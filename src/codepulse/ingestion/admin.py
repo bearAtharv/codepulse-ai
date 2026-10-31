@@ -122,7 +122,16 @@ def retry_posting(
     owner, repo_name = repo.full_name.split("/", 1)
     pr_number = run.pull_request_number
 
-    poster = get_github_poster()
+    token = None
+    settings = get_settings()
+    if not settings.mock_github and repo and repo.installation_id:
+        try:
+            from codepulse.ingestion.diff_fetcher import get_diff_fetcher
+            fetcher = get_diff_fetcher()
+            token = fetcher.get_installation_token(int(repo.installation_id))
+        except Exception as exc:
+            logger.warning("Failed to obtain GitHub App installation token for repo %s: %s", repo.full_name, exc)
+    poster = get_github_poster(token=token)
     try:
         response = poster.post_review(
             owner=owner,

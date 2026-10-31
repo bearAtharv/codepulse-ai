@@ -183,11 +183,25 @@ class TestSensitiveDataRedaction:
         assert "[REDACTED_GEMINI_KEY]" in sanitized
 
     def test_redacts_github_tokens(self) -> None:
-        """GitHub personal access tokens must be replaced with redaction markers."""
+        """GitHub personal access tokens and installation tokens must be replaced with redaction markers."""
         classic_pat = "Authorization: token ghp_1234567890abcdefghijklmnopqrstuvwx"
         fine_grained = "Using github_pat_11AEXAMPLE01234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ12345"
+        installation_tok = "Obtained installation token ghs_1234567890abcdefghijklmnopqrstuvwxyz for app"
         assert "[REDACTED_GITHUB_TOKEN]" in sanitize_text(classic_pat)
         assert "[REDACTED_GITHUB_PAT]" in sanitize_text(fine_grained)
+        assert "[REDACTED_GITHUB_INSTALLATION_TOKEN]" in sanitize_text(installation_tok)
+        assert "ghs_" not in sanitize_text(installation_tok)
+
+    def test_redacts_private_key_headers(self) -> None:
+        """Private key headers must be redacted even without matching END delimiters."""
+        rsa_header = "Loaded private key: -----BEGIN RSA PRIVATE KEY-----"
+        generic_header = "Key content: BEGIN PRIVATE KEY"
+        sanitized_rsa = sanitize_text(rsa_header)
+        sanitized_gen = sanitize_text(generic_header)
+        assert "BEGIN RSA PRIVATE KEY" not in sanitized_rsa
+        assert "[REDACTED_PRIVATE_KEY_HEADER]" in sanitized_rsa
+        assert "BEGIN PRIVATE KEY" not in sanitized_gen
+        assert "[REDACTED_PRIVATE_KEY_HEADER]" in sanitized_gen
 
     def test_redacts_bearer_tokens(self) -> None:
         """Bearer tokens in headers must be masked."""

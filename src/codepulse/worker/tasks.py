@@ -29,7 +29,7 @@ import random
 import time
 import traceback
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from celery import chain, chord
@@ -782,7 +782,8 @@ def analyze_llm_task(
             record_circuit_breaker("gemini", 0.5)
         else:
             record_circuit_breaker("gemini", 0.0)
-        if not is_direct and failure_retries < 3:
+        is_injected = is_mock_mode_enabled() and os.environ.get("MOCK_LLM_FAILURE", "").lower() in ("true", "1", "yes")
+        if not is_direct and failure_retries < 3 and new_state != "OPEN" and not is_injected:
             delay = get_retry_delay(ANALYZE_LLM_BACKOFF, failure_retries)
             logger.warning(
                 "analyze_llm failed (attempt %d/3) for run %s (%s). Retrying in %ds...",
@@ -1108,7 +1109,14 @@ def post_review_to_github(self: Any, data: dict[str, Any]) -> dict[str, Any]:
             data["posting_error"] = str(exc)
             return data
 
-    poster = get_github_poster()
+    token = None
+    if not settings.mock_github and installation_id:
+        try:
+            fetcher = get_diff_fetcher()
+            token = fetcher.get_installation_token(int(installation_id))
+        except Exception as exc:
+            logger.warning("Failed to obtain GitHub App installation token for installation %s: %s", installation_id, exc)
+    poster = get_github_poster(token=token)
     try:
         response = poster.post_review(
             owner,
@@ -1576,7 +1584,15 @@ def scan_reanalysis_needed() -> int:
                         "commit_id": run.head_sha,
                     }
 
-                    poster = get_github_poster()
+                    token = None
+                    settings = get_settings()
+                    if not settings.mock_github and repo and repo.installation_id:
+                        try:
+                            fetcher = get_diff_fetcher()
+                            token = fetcher.get_installation_token(int(repo.installation_id))
+                        except Exception as exc:
+                            logger.warning("Failed to obtain GitHub App installation token for repo %s: %s", repo.full_name, exc)
+                    poster = get_github_poster(token=token)
                     resp_id: int | None = None
                     try:
                         resp = poster.post_review(owner, repo_name, pr_number, review_payload)
@@ -1679,4 +1695,143 @@ def scan_reanalysis_needed() -> int:
                 redis_client.delete(lock_key)
 
     return reanalyzed_count
+
+
+@celery_app.task(
+    name="tasks.scan_unposted_reviews",
+    queue="cp-high",
+    soft_time_limit=120,
+    time_limit=180,
+)
+def scan_unposted_reviews(cutoff_minutes: int = 15) -> int:
+    """Periodic task on Celery Beat (every 10 min per §6.4) to re-enqueue unposted reviews older than 15 minutes.
+
+    Scans for completed runs with review_posted_at IS NULL created older than cutoff_minutes (default: 15).
+    Retrieves the durable Branch F review payload from dead_letter_log (or Redis fallback),
+    and re-posts the review to GitHub idempotently.
+    """
+    factory = get_session_factory()
+    redis_client = get_redis_client()
+    now_utc = datetime.now(timezone.utc)
+    cutoff_ts = now_utc - timedelta(minutes=cutoff_minutes)
+    reposted_count = 0
+
+    with factory() as db:
+        runs = (
+            db.query(AnalysisRun)
+            .filter(
+                AnalysisRun.status == "completed",
+                AnalysisRun.review_posted_at.is_(None),
+                AnalysisRun.created_at <= cutoff_ts,
+            )
+            .order_by(AnalysisRun.created_at.asc())
+            .limit(10)
+            .all()
+        )
+
+        for run in runs:
+            run_id = str(run.id)
+            lock_key = f"lock:repost_unposted:{run_id}"
+            acquired = redis_client.set(lock_key, "1", nx=True, ex=300)
+            if not acquired:
+                continue
+
+            try:
+                # 1. Look for durable Branch F payload in dead_letter_log
+                dead_letters = (
+                    db.query(DeadLetterLog)
+                    .filter(
+                        DeadLetterLog.task_name.in_(["tasks.post_review_to_github", "post_review_to_github"]),
+                        DeadLetterLog.resolved == False,  # noqa: E712
+                    )
+                    .order_by(DeadLetterLog.id.desc())
+                    .all()
+                )
+                target_dl = None
+                review_payload = None
+                for dl in dead_letters:
+                    args = dl.task_args or {}
+                    t_run_id = args.get("analysis_run_id") or args.get("context", {}).get("analysis_run_id")
+                    if t_run_id and str(t_run_id) == run_id:
+                        target_dl = dl
+                        review_payload = args.get("review_payload")
+                        break
+
+                if not review_payload:
+                    review_payload = get_payload_ref(f"review_payload:{run_id}")
+
+                if not review_payload:
+                    logger.warning("No durable review payload found for unposted run %s. Skipping.", run_id)
+                    continue
+
+                repo = run.repository
+                owner, repo_name = repo.full_name.split("/", 1)
+                pr_number = run.pull_request_number
+
+                # 2. Check if PR head SHA moved (superseded)
+                diff_fetcher = get_diff_fetcher()
+                try:
+                    current_head = diff_fetcher.fetch_pr_head_sha(
+                        owner, repo_name, pr_number, repo.installation_id
+                    ) or run.head_sha
+                except Exception:
+                    current_head = run.head_sha
+
+                if current_head != run.head_sha:
+                    logger.info(
+                        "PR %s#%d head moved from %s to %s. Unposted review superseded for run %s.",
+                        repo.full_name,
+                        pr_number,
+                        run.head_sha[:8],
+                        current_head[:8],
+                        run_id,
+                    )
+                    if target_dl:
+                        target_dl.resolved = True
+                    db.commit()
+                    continue
+
+                # 3. Post review to GitHub
+                token = None
+                settings = get_settings()
+                if not settings.mock_github and repo and repo.installation_id:
+                    try:
+                        fetcher = get_diff_fetcher()
+                        token = fetcher.get_installation_token(int(repo.installation_id))
+                    except Exception as exc:
+                        logger.warning("Failed to obtain GitHub App installation token for repo %s: %s", repo.full_name, exc)
+                poster = get_github_poster(token=token)
+                try:
+                    resp = poster.post_review(owner, repo_name, pr_number, review_payload)
+                    review_id = resp.get("id")
+                    run.review_posted_at = datetime.now(timezone.utc)
+                    if review_id:
+                        run.github_review_id = review_id
+                    for f in run.findings:
+                        f.is_posted = True
+                    if target_dl:
+                        target_dl.resolved = True
+                    db.commit()
+                    reposted_count += 1
+                    logger.info(
+                        "scan_unposted_reviews successfully re-posted review %s for run %s (%s#%d)",
+                        review_id,
+                        run_id,
+                        repo.full_name,
+                        pr_number,
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "scan_unposted_reviews failed to post review for run %s (%s#%d): %s",
+                        run_id,
+                        repo.full_name,
+                        pr_number,
+                        exc,
+                    )
+                    db.rollback()
+
+            finally:
+                redis_client.delete(lock_key)
+
+    return reposted_count
 

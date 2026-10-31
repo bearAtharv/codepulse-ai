@@ -25,6 +25,11 @@ htmlcov/
 
 # Environment
 .env
+*.env
+*.env.*
+*.pem
+secrets/*
+!secrets/.gitkeep
 
 # Docker
 postgres_data/

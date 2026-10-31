@@ -8,8 +8,10 @@ from typing import Any
 
 # Sensitive pattern definitions matching secrets, tokens, and diff contents
 SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
-    # Google / Gemini API keys (AIza followed by ~35 base64url characters)
-    (re.compile(r"AIza[0-9A-Za-z\-_]{30,45}"), "[REDACTED_GEMINI_KEY]"),
+    # Google / Gemini API keys (AIza prefix)
+    (re.compile(r"AIza[0-9A-Za-z\-_]{15,60}"), "[REDACTED_GEMINI_KEY]"),
+    # GitHub App Installation Tokens (server-to-server)
+    (re.compile(r"ghs_[A-Za-z0-9_]{10,255}"), "[REDACTED_GITHUB_INSTALLATION_TOKEN]"),
     # GitHub Personal Access Tokens (classic and fine-grained)
     (re.compile(r"gh[pousr]_[A-Za-z0-9_]{28,255}"), "[REDACTED_GITHUB_TOKEN]"),
     (re.compile(r"github_pat_[A-Za-z0-9_]{20,255}"), "[REDACTED_GITHUB_PAT]"),
@@ -20,8 +22,9 @@ SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"://([^:/@\s]+):([^@\s]+)@"), r"://\1:[REDACTED_PASSWORD]@"),
     # AWS access key IDs
     (re.compile(r"AKIA[0-9A-Z]{16}"), "[REDACTED_AWS_KEY]"),
-    # Private keys
+    # Private keys (full block or standalone header)
     (re.compile(r"-----BEGIN [A-Z ]+ PRIVATE KEY-----[^-]+-----END [A-Z ]+ PRIVATE KEY-----", re.DOTALL), "[REDACTED_PRIVATE_KEY]"),
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----|BEGIN [A-Z ]*PRIVATE KEY"), "[REDACTED_PRIVATE_KEY_HEADER]"),
     # Raw diff patches and customer source chunks
     (re.compile(r"diff --git a/.*?(?=(\ndiff --git|\Z))", re.DOTALL), "[REDACTED_DIFF]"),
     (re.compile(r"@@\s+-\d+(?:,\d+)?\s+\+\d+(?:,\d+)?\s+@@.*?(?=(\n@@|\Z))", re.DOTALL), "[REDACTED_DIFF_HUNK]"),
