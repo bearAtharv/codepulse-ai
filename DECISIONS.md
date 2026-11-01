@@ -654,6 +654,57 @@ Reviewing these requirements against production realities and upstream ecosystem
    - **Redis is Authoritative:** The authoritative, real-time circuit state is stored in Redis at key `circuit:gemini:state`. When diagnosing probe transitions, operators should query Redis (`redis-cli get circuit:gemini:state`).
    - **Prometheus is for Fleet Availability Trends:** The Prometheus gauge `codepulse_circuit_breaker_state` serves to visualize availability over time and alert on prolonged outages (`codepulse_circuit_breaker_state == 1.0` for > 1m), rather than capturing sub-second probe transitions.
 
+---
+
+## DEC-026: OpenTelemetry Distributed Tracing & Tempo Integration Architecture (§9.3, DEC-018)
+
+**Context:** Section 9.3 requires distributed tracing with unique trace IDs correlated between webhook receipt, asynchronous Celery processing, and outbound API calls. Section 9.4 strictly mandates that customer code, diff contents, and sensitive credentials must never be exported to telemetry backends.
+
+**Decision & Architectural Implementation:**
+1. **OpenTelemetry SDK Integration (v1.45.2):**
+   - Both `codepulse-web` and `codepulse-worker` initialize standard OpenTelemetry `TracerProvider` instances sending protobuf-over-HTTP spans to Grafana Tempo (`http://tempo:4318/v1/traces`).
+   - Standard W3C Trace Context (`traceparent` header) is extracted from incoming webhook requests, propagated across Celery task headers, and injected into outbound HTTP requests to GitHub and Gemini.
+2. **Celery Prefork Process Lifecycle:**
+   - In Celery prefork mode, `init_tracing()` is attached to the `@worker_process_init.connect` signal. This ensures that every child worker process creates its own background span processor thread and tracer provider instance cleanly after OS `fork()`.
+3. **Data Privacy & Strict Attribute Allowlist:**
+   - Spans are filtered through `SafeSpanWrapper` against `ALLOWED_SPAN_ATTRIBUTES`. Only operational metadata (`trace_id`, `span_id`, `repository`, `pr_number`, `head_sha`, `status_code`, token counts) are permitted.
+   - Any attribute containing source code, diff hunks, review text, or authorization secrets is dropped or sanitized via `sanitize_text()`.
+4. **Grafana Tempo & Loki Bidirectional Linking:**
+   - Grafana Tempo v3.1.1 is provisioned in Compose. Grafana Tempo datasource is linked to Loki via `tracesToLogsV2` (mapping `trace_id` to Loki LogQL queries), while the Loki datasource defines `derivedFields` converting extracted `trace_id` strings into direct one-click Tempo trace visualizer links.
+5. **Feature Flag:**
+   - Tracing can be completely disabled in resource-constrained environments by setting `OTEL_TRACING_ENABLED=false`.
+
+---
+
+## DEC-027: Kubernetes Helm Chart Architecture & Autoscaling Strategy (§8, §4.4, §8.2)
+
+**Context:** Section 8 and Section 4.4 define Kubernetes deployments, resource requests/limits, KEDA autoscaling thresholds, and network policies for production multi-tenant operations.
+
+**Decision & Architectural Implementation:**
+1. **Dedicated Queue Deployments (§8.2):**
+   - Celery workers are segregated into separate Deployments (`worker-high`, `worker-analysis`, `worker-aggregate`, `worker-retry`, `worker-dlq`) with concurrency and CPU/memory sizing matching §8.2:
+     - `ingestion`: CPU 250m/500m, Memory 256Mi/512Mi (3 replicas).
+     - `worker-analysis`: CPU 500m/1000m, Memory 512Mi/1Gi (5 replicas min).
+     - `worker-high`: CPU 250m/500m, Memory 256Mi/512Mi (3 replicas min).
+     - `worker-aggregate`: CPU 250m/500m, Memory 256Mi/512Mi (2 replicas min).
+     - `beat`: CPU 100m/200m, Memory 128Mi/256Mi (1 replica with `strategy.type: Recreate`).
+     - `admin`: CPU 250m/500m, Memory 256Mi/512Mi (2 replicas, judgment call).
+     - `retry` & `dlq`: CPU 250m/500m, Memory 256Mi/512Mi (judgment call for dedicated handling of rate-limited tasks and DLQ inspection).
+2. **KEDA Event-Driven Autoscaling (§4.4):**
+   - Each queue deployment is paired with a KEDA `ScaledObject` triggering on Redis list lengths:
+     - `cp-high`: target 50 tasks (min 3, max 10).
+     - `cp-analysis`: target 100 tasks (min 5, max 30).
+     - `cp-aggregate`: target 30 tasks (min 2, max 10).
+   - Polling interval is set to 10s; scale-down cooldown period is set to 300s (5 minutes) with a 20% scale-down policy per 60s to prevent pod thrashing under bursty webhook delivery.
+   - Ingestion pods autoscale via HPA on 60% CPU utilization.
+3. **Ingress Security & Network Policies (§8.2):**
+   - The Kubernetes Ingress routes strictly to `/webhooks` and `/health` paths on the ingestion service.
+   - Internal administrative endpoints (`/admin`) and Prometheus scraping ports (`/metrics`) are strictly blocked from Ingress definition.
+   - Kubernetes `NetworkPolicy` objects enforce strict default-deny isolation, allowing ingress to ingestion only from Ingress controller, and egress from workers only to Redis, PostgreSQL, Tempo, and external HTTPS (443) for GitHub and Gemini APIs.
+4. **Validation Scope:**
+   - The chart is verified through static analysis (`helm lint`), template rendering against default and production configurations (`helm template`), and strict schema validation (`kubeconform` with upstream Kubernetes and KEDA CRD schemas). It is documented as lint- and schema-verified only, without deployment to a live cluster.
+
+
 
 
 

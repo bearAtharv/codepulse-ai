@@ -2,6 +2,36 @@
 
 All notable changes to CodePulse AI are documented here.
 
+## [1.0.0-rc1] — 2026-11-01
+
+### Added
+- **GitHub API Circuit Breaker (§6.3)**:
+  - Separate, dedicated circuit breaker protecting outbound GitHub REST API operations (PR diff fetching and review comment posting) alongside the existing Gemini circuit breaker.
+  - Standard §6.3 parameters: 5 consecutive failures in 60s sliding window, 30s recovery timeout, single half-open probe request.
+  - Exported through `codepulse_circuit_breaker_state{api="github"}` Prometheus gauge.
+  - Unit and integration tests covering OPEN/CLOSED/HALF_OPEN transitions and fallback paths.
+- **OpenTelemetry Distributed Tracing & Tempo Integration (§9.3, DEC-018)**:
+  - Full OpenTelemetry Python SDK (v1.45.2) implementation across FastAPI ingestion service and Celery worker child processes.
+  - Distributed trace correlation across HTTP requests, task queue boundaries, and outbound API calls using W3C Trace Context (`traceparent` header).
+  - Explicit spans generated for webhook receipt (`http.webhook_receive`), all Celery DAG tasks, outbound GitHub API calls (`github.fetch_diff`, `github.post_review`), and Gemini LLM calls (`gemini.generate_content`).
+  - Privacy and redaction enforcement: strict attribute allowlist (`ALLOWED_SPAN_ATTRIBUTES`) and automated secret redaction ensuring source code, diff hunks, review text, and credentials never enter trace spans.
+  - Standalone Grafana Tempo v3.1.1 service provisioned in Docker Compose with OTLP HTTP (4318) and query (3200) endpoints.
+  - Provisioned Grafana Tempo datasource with bidirectional Trace-to-Logs navigation linking Tempo spans to Loki log streams.
+  - Tracing toggleable via `OTEL_TRACING_ENABLED` environment variable.
+- **Production Kubernetes Helm Chart (§8, §4.4, §8.2)**:
+  - Production-ready Helm v3 chart located in `deploy/helm/codepulse`.
+  - Dedicated Deployments: `ingestion` (FastAPI), queue-specific Celery workers (`worker-high`, `worker-analysis`, `worker-aggregate`, `worker-retry`, `worker-dlq`), `beat` (1 replica with `strategy.type: Recreate`), and `admin` API.
+  - Resource requests and limits configured per §8.2 specifications (ingestion 250m/256Mi, analysis 500m/512Mi, etc.).
+  - Autoscaling: KEDA `ScaledObject` templates with Redis list-length triggers matching §4.4 (`cp-high` > 50, `cp-analysis` > 100, `cp-aggregate` > 30), 10s polling, and 300s scale-down stabilization window. Ingestion autoscaling via HPA on 60% CPU utilization.
+  - Ingress Security: Exposes strictly `/webhooks` and `/health` paths; internal endpoints (`/metrics`, `/admin`) are never exposed externally.
+  - NetworkPolicies: Restricted ingress and egress rules isolating ingestion and worker pods, restricting egress to Redis, PostgreSQL, Tempo (4318), and HTTPS (443) for external APIs.
+  - Pre-install / pre-upgrade migration hook Job executing `alembic upgrade head`.
+  - Secret templates with placeholder values and Bitnami `SealedSecret` support.
+  - Validated with `helm lint`, `helm template` (default & prod), and `kubeconform` (22/22 valid with zero errors against upstream Kubernetes and KEDA schemas).
+- **Test Suite Growth**:
+  - Full test suite: **396 tests** passing across host (Python 3.14) and container (Python 3.12).
+
+
 ## [0.9.0] — 2026-11-01
 
 ### Added
