@@ -376,11 +376,44 @@ def fetch_pr_diff(self: Any, payload: dict[str, Any]) -> dict[str, Any]:
     # Normal rate limit headroom record (§9.2)
     record_github_rate_limit(installation_id, 4990)
 
+    # GitHub Circuit Breaker (§6.3)
+    redis_client = get_redis_client()
+    github_breaker = CircuitBreaker(redis_client, name="github")
+    allowed_by_breaker, breaker_state = github_breaker.can_execute()
+
+    if not allowed_by_breaker:
+        record_circuit_breaker("github", 1.0)
+        logger.warning(
+            "GitHub circuit breaker is OPEN for %s#%d. Diff fetch blocked.",
+            repo_full_name,
+            pr_number,
+        )
+        exc = RuntimeError("GitHub circuit breaker is OPEN")
+        if not is_direct and retries < 3:
+            delay = get_retry_delay(FETCH_PR_DIFF_BACKOFF, retries)
+            raise self.retry(exc=exc, countdown=delay)
+        else:
+            record_terminal_failure(analysis_run_id, error_message="GitHub circuit breaker OPEN")
+            record_dead_letter(
+                task_name="tasks.fetch_pr_diff",
+                task_id=getattr(self.request, "id", None) or str(uuid.uuid4()),
+                task_args=payload,
+                exc=exc,
+                retry_count=retries,
+            )
+            raise exc
+    elif breaker_state == "HALF_OPEN":
+        record_circuit_breaker("github", 0.5)
+    else:
+        record_circuit_breaker("github", 0.0)
+
     # Failure injection (§7.6)
     if settings.mock_github and (
         settings.mock_diff_fetch_failure
         or os.environ.get("MOCK_DIFF_FETCH_FAILURE", "").lower() in ("true", "1", "yes")
     ):
+        new_state = github_breaker.record_failure()
+        record_circuit_breaker("github", 1.0 if new_state == "OPEN" else (0.5 if new_state == "HALF_OPEN" else 0.0))
         exc = RuntimeError("Simulated GitHub diff fetch failure (MOCK_DIFF_FETCH_FAILURE)")
         if not is_direct and retries < 3:
             delay = get_retry_delay(FETCH_PR_DIFF_BACKOFF, retries)
@@ -406,9 +439,13 @@ def fetch_pr_diff(self: Any, payload: dict[str, Any]) -> dict[str, Any]:
     try:
         diff_fetcher = get_diff_fetcher()
         files = diff_fetcher.fetch_pr_files(owner, repo, pr_number, installation_id=installation_id)
+        github_breaker.record_success()
+        record_circuit_breaker("github", 0.0)
     except (Retry, Ignore):
         raise
     except Exception as exc:
+        new_state = github_breaker.record_failure()
+        record_circuit_breaker("github", 1.0 if new_state == "OPEN" else (0.5 if new_state == "HALF_OPEN" else 0.0))
         if not is_direct and retries < 3:
             delay = get_retry_delay(FETCH_PR_DIFF_BACKOFF, retries)
             logger.warning(
@@ -1071,11 +1108,50 @@ def post_review_to_github(self: Any, data: dict[str, Any]) -> dict[str, Any]:
     # Normal rate limit headroom record (§9.2)
     record_github_rate_limit(installation_id, 4990)
 
+    # GitHub Circuit Breaker (§6.3)
+    redis_client = get_redis_client()
+    github_breaker = CircuitBreaker(redis_client, name="github")
+    allowed_by_breaker, breaker_state = github_breaker.can_execute()
+
+    if not allowed_by_breaker:
+        record_circuit_breaker("github", 1.0)
+        logger.warning(
+            "GitHub circuit breaker is OPEN for %s#%d. Review posting blocked.",
+            repo_full_name,
+            pr_number,
+        )
+        exc = RuntimeError("GitHub circuit breaker is OPEN")
+        if not is_direct and retries < 5:
+            delay = get_retry_delay(POST_REVIEW_BACKOFF, retries)
+            raise self.retry(exc=exc, countdown=delay)
+        else:
+            record_dead_letter(
+                task_name="tasks.post_review_to_github",
+                task_id=getattr(self.request, "id", None) or str(uuid.uuid4()),
+                task_args={
+                    "analysis_run_id": analysis_run_id,
+                    "review_payload": review_payload,
+                    "context": ctx,
+                },
+                exc=exc,
+                retry_count=retries,
+            )
+            data["github_review_id"] = None
+            data["review_posted_at"] = None
+            data["posting_error"] = str(exc)
+            return data
+    elif breaker_state == "HALF_OPEN":
+        record_circuit_breaker("github", 0.5)
+    else:
+        record_circuit_breaker("github", 0.0)
+
     # Failure injection (§7.6)
     if settings.mock_github and (
         settings.mock_posting_failure
         or os.environ.get("MOCK_POSTING_FAILURE", "").lower() in ("true", "1", "yes")
     ):
+        new_state = github_breaker.record_failure()
+        record_circuit_breaker("github", 1.0 if new_state == "OPEN" else (0.5 if new_state == "HALF_OPEN" else 0.0))
         exc = RuntimeError("Simulated GitHub review posting failure (MOCK_POSTING_FAILURE)")
         if not is_direct and retries < 5:
             delay = get_retry_delay(POST_REVIEW_BACKOFF, retries)
@@ -1125,6 +1201,8 @@ def post_review_to_github(self: Any, data: dict[str, Any]) -> dict[str, Any]:
             review_payload,
         )
         record_github_api_call(f"/repos/{owner}/{repo}/pulls/{pr_number}/reviews", status_code=200)
+        github_breaker.record_success()
+        record_circuit_breaker("github", 0.0)
         data["github_review_id"] = response.get("id")
         data["review_posted_at"] = datetime.now(timezone.utc).isoformat()
         logger.info(
@@ -1137,6 +1215,8 @@ def post_review_to_github(self: Any, data: dict[str, Any]) -> dict[str, Any]:
     except (Retry, Ignore):
         raise
     except Exception as exc:
+        new_state = github_breaker.record_failure()
+        record_circuit_breaker("github", 1.0 if new_state == "OPEN" else (0.5 if new_state == "HALF_OPEN" else 0.0))
         if not is_direct and retries < 5:
             delay = get_retry_delay(POST_REVIEW_BACKOFF, retries)
             logger.warning(
@@ -1791,7 +1871,19 @@ def scan_unposted_reviews(cutoff_minutes: int = 15) -> int:
                     db.commit()
                     continue
 
-                # 3. Post review to GitHub
+                # 3. Post review to GitHub (guarded by GitHub Circuit Breaker)
+                github_breaker = CircuitBreaker(redis_client, name="github")
+                allowed_by_breaker, _ = github_breaker.can_execute()
+                if not allowed_by_breaker:
+                    record_circuit_breaker("github", 1.0)
+                    logger.warning(
+                        "GitHub circuit breaker is OPEN. Skipping unposted review retry for %s#%d (run %s).",
+                        repo.full_name,
+                        pr_number,
+                        run_id,
+                    )
+                    continue
+
                 token = None
                 settings = get_settings()
                 if not settings.mock_github and repo and repo.installation_id:
@@ -1803,6 +1895,8 @@ def scan_unposted_reviews(cutoff_minutes: int = 15) -> int:
                 poster = get_github_poster(token=token)
                 try:
                     resp = poster.post_review(owner, repo_name, pr_number, review_payload)
+                    github_breaker.record_success()
+                    record_circuit_breaker("github", 0.0)
                     review_id = resp.get("id")
                     run.review_posted_at = datetime.now(timezone.utc)
                     if review_id:
@@ -1821,6 +1915,8 @@ def scan_unposted_reviews(cutoff_minutes: int = 15) -> int:
                         pr_number,
                     )
                 except Exception as exc:
+                    new_state = github_breaker.record_failure()
+                    record_circuit_breaker("github", 1.0 if new_state == "OPEN" else 0.0)
                     logger.error(
                         "scan_unposted_reviews failed to post review for run %s (%s#%d): %s",
                         run_id,

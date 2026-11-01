@@ -264,6 +264,91 @@ class TestCircuitBreaker:
         assert new_state == "CLOSED"
         assert breaker.get_state() == "CLOSED"
 
+    def test_github_circuit_breaker_trip_half_open_close(self) -> None:
+        """Verifies §6.3 circuit breaker state machine specifically for GitHub API calls."""
+        redis_client = get_redis_client()
+        breaker = CircuitBreaker(
+            redis_client=redis_client,
+            name="github",
+            failure_threshold=5,
+            failure_window=60.0,
+            recovery_timeout=0.2,
+        )
+        breaker.reset()
+        try:
+            assert breaker.get_state() == "CLOSED"
+
+            for _ in range(4):
+                breaker.record_failure()
+            assert breaker.get_state() == "CLOSED"
+
+            breaker.record_failure()
+            assert breaker.get_state() == "OPEN"
+
+            allowed, state = breaker.can_execute()
+            assert allowed is False
+            assert state == "OPEN"
+
+            time.sleep(0.25)
+
+            allowed_probe, state_probe = breaker.can_execute()
+            assert allowed_probe is True
+            assert state_probe == "HALF_OPEN"
+
+            new_state = breaker.record_success()
+            assert new_state == "CLOSED"
+            assert breaker.get_state() == "CLOSED"
+        finally:
+            breaker.reset()
+
+    def test_github_circuit_breaker_blocks_outbound_tasks(self) -> None:
+        """When GitHub circuit breaker is OPEN, outbound tasks catch it and trigger failure handling."""
+        from codepulse.metrics.registry import CIRCUIT_BREAKER_STATE
+        from codepulse.worker.tasks import fetch_pr_diff
+
+        redis_client = get_redis_client()
+        breaker = CircuitBreaker(redis_client=redis_client, name="github")
+        breaker.reset()
+
+        # Trip the breaker
+        for _ in range(5):
+            breaker.record_failure()
+        assert breaker.get_state() == "OPEN"
+
+        try:
+            # fetch_pr_diff called directly raises when breaker is OPEN
+            with pytest.raises(RuntimeError, match="GitHub circuit breaker is OPEN"):
+                fetch_pr_diff({
+                    "repository_full_name": "org/repo",
+                    "pull_request_number": 1,
+                    "installation_id": 1234,
+                    "analysis_run_id": str(uuid.uuid4()),
+                })
+            # Metric should reflect 1.0 (OPEN)
+            val = CIRCUIT_BREAKER_STATE.labels(api="github")._value.get()
+            assert val == 1.0
+
+            # post_review_to_github called directly records dead letter / returns posting_error
+            data = {
+                "context": {
+                    "repository_full_name": "org/repo",
+                    "pull_request_number": 1,
+                    "installation_id": 1234,
+                    "analysis_run_id": str(uuid.uuid4()),
+                },
+                "review_payload": {
+                    "event": "COMMENT",
+                    "body": "Test",
+                    "comments": [],
+                },
+            }
+            res = post_review_to_github(data)
+            assert res.get("github_review_id") is None
+            assert "GitHub circuit breaker is OPEN" in str(res.get("posting_error"))
+        finally:
+            breaker.reset()
+            CIRCUIT_BREAKER_STATE.labels(api="github").set(0.0)
+
     def test_llm_task_catches_failure_and_returns_degraded(self) -> None:
         """When LLM breaker is OPEN, task returns degraded result without crashing chord."""
         chunk = make_chunk_dict()

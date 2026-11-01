@@ -176,7 +176,7 @@ flowchart TD
 | **GitHub Review Client** | ✅ | ✅ | 🔲 | RS256 JWT generation, token exchange, atomic reviews. MockGitHubPoster verified; live API pending. |
 | **Celery Pipeline & Worker Service** | ✅ | ✅ | N/A | Prefork workers on dedicated queues (`cp-high`, `cp-analysis`, `cp-aggregate`, `cp-retry`). |
 | **Rate Limiter (Gemini)** | ✅ | ✅ | N/A | Redis Lua token bucket (324 RPM, burst 10) with jittered retries and wait deadline degradation. |
-| **Circuit Breakers (Gemini & GitHub)** | ✅ | ✅ | N/A | Spec §6.3 circuit breakers tracking failures, tripping to OPEN, and probing in HALF_OPEN. |
+| **Circuit Breakers (Gemini & GitHub)** | ✅ | ✅ | 🔲 | Spec §6.3 circuit breakers for both Gemini and outbound GitHub calls (diff fetch & review post) with failure window, recovery timeout, and `codepulse_circuit_breaker_state{api="gemini|github"}` metrics. |
 | **Graceful Degradation (§6.4)** | ✅ | ✅ | N/A | Degrades to AST-only when breaker OPEN or deadline exceeded; auto-recovered by Celery Beat sweep. |
 | **Dead-Letter Handling & Admin Retry** | ✅ | ✅ | N/A | Durable review payloads stored in `dead_letter_log`; retryable via Beat or `POST /admin/retry-posting`. |
 | **Observability (Metrics & Dashboards)** | ✅ | ✅ | N/A | Prometheus v3 scraping isolated internal ports (9090, 9091) + 4 provisioned Grafana dashboards. |
