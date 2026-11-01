@@ -2,7 +2,22 @@
 
 All notable changes to CodePulse AI are documented here.
 
-## [Unreleased] — Phase 8a-ii: Structured Logging, Trace IDs, Loki, and Alloy
+## [0.9.0] — 2026-11-01
+
+### Added
+- **README Rewrite & Architecture Diagrams**: Plain-language overview, three Mermaid diagrams (system architecture, PR review lifecycle sequence, and comprehensive failure/degradation paths), quick start guide for fresh machines, known limitations from ADRs, and clear documentation pointers.
+- **Webhook Test CLI Tool (`scripts/send_test_webhook.py`)**: Command-line tool to build, sign (HMAC-SHA256), and send pull request webhook events to the ingestion service without leaking webhook secrets.
+- **Live Smoke Test Runbook (`docs/LIVE_SMOKE_TEST.md`)**: Complete operator guide for Stage 1 (Mock LLM + Live GitHub) and Stage 2 (Live Gemini + Live GitHub), including exact `.env` variable list, PostgreSQL password volume migration procedures, expected log outputs/DB states, and a comprehensive troubleshooting guide.
+- **Preflight Validation Utility (`scripts/preflight_live.py`)**: Dry-run verification of environment variables, RSA private key integrity, and security constraints before container launch.
+- **Single-Series Prometheus Recording Rule**: Replaced worker-side multiprocess cache ratio gauge with a single-series global Prometheus recording rule (`codepulse_llm_cache_hit_ratio`).
+- **Configurable Beat Recovery Intervals**: Configurable Celery Beat periodic sweep schedule (`BEAT_UNPOSTED_REVIEWS_INTERVAL`) for unposted review recovery.
+- **Expanded Gemini API Key Support**: Sanitizer and redaction filters updated to support Google Gemini API keys with `AQ.` prefix in addition to standard `AIza` keys.
+
+### Changed
+- Refactored `docker-compose.yml` to pass through `GITHUB_WEBHOOK_SECRET` and `ADMIN_API_KEY` from environment/.env.
+- Total test suite: **390 tests** passing on host and container environments.
+
+## [Phase 8a-ii] — Structured Logging, Trace IDs, Loki, and Alloy
 
 ### Added
 - **Distributed Tracing & W3C Trace Context (§9.3, DEC-018)** (`src/codepulse/observability/tracing.py`):

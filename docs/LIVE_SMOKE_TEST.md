@@ -33,7 +33,7 @@ Expose local port 8000 to the internet using a forwarding tunnel:
 
 ```bash
 # Option A: Smee.io (Recommended for GitHub webhooks)
-smee --url https://smee.io/<your-channel-id> --target http://127.0.0.1:8000/webhook
+smee --url https://smee.io/<your-channel-id> --target http://127.0.0.1:8000/webhooks
 
 # Option B: ngrok
 ngrok http 8000
@@ -41,7 +41,12 @@ ngrok http 8000
 # Option C: Cloudflare Tunnel
 cloudflared tunnel --url http://127.0.0.1:8000
 ```
-Update your GitHub App's **Webhook URL** to the public tunnel endpoint (`.../webhook`).
+Update your GitHub App's **Webhook URL** to the public tunnel endpoint (`.../webhooks`).
+
+You can also simulate or smoke-test webhook ingress locally at any time without a tunnel using the built-in test script:
+```bash
+python3 scripts/send_test_webhook.py --repo "your-org/codepulse-smoke-test" --pr 1
+```
 
 ### 1.3 Google Gemini API Key
 Obtain an API key with access to `gemini-3.7-flash` and `gemini-2.5-pro` from [Google AI Studio](https://aistudio.google.com/).

@@ -1,485 +1,292 @@
 # CodePulse AI
 
-**AI-powered code review that catches security vulnerabilities and memory leaks before they reach production.**
+**Automated GitHub Pull Request code reviewer that catches security vulnerabilities and memory leaks before they reach production.**
 
-CodePulse AI is a GitHub App that automatically reviews pull requests using a combination of static analysis (AST-based pattern matching via tree-sitter) and LLM-powered analysis (Google Gemini). When a developer opens or updates a PR, CodePulse analyzes the changed code and posts inline review comments highlighting potential issues — complete with explanations and suggested fixes.
-
----
-
-## Phase Status
-
-| Phase | Description | Status |
-|-------|-------------|--------|
-| **1** | Project skeleton + data model | ✅ Done |
-| **2** | Webhook ingestion service | ✅ Done |
-| **3** | AST analysis engine (Python, JS/TS) | ✅ Done |
-| **4** | LLM analysis engine (Gemini) | ✅ Done |
-| **5** | Aggregation, dedup, GitHub review posting | ✅ Done |
-| **6** | Celery orchestration wiring | ✅ Done |
-| **7a** | Ref-passing pipeline, retries, dead-letter, admin retry | ✅ Done |
-| **7b** | Rate limiting, circuit breakers, caching, error branches | ✅ Done |
-| **8a-i** | Metrics, Prometheus, & Grafana dashboards (Compose) | ✅ Done |
-| **8a-ii** | Distributed tracing & log aggregation (Tempo/Loki) | 🔲 Planned |
-| **8b** | Kubernetes manifests + Helm chart deployment | 🔲 Planned |
+CodePulse AI is an enterprise-grade automated review bot for GitHub Pull Requests. It combines deterministic static analysis (AST pattern matching via tree-sitter) with deep semantic reasoning via Google Gemini (`gemini-3.7-flash` and `gemini-2.5-pro`). When a pull request is opened or updated, CodePulse analyzes the modified code chunks in parallel, deduplicates and ranks findings, and posts structured inline comments and a summary review directly to GitHub.
 
 ---
 
-## How It Works
+## Architecture Diagrams
 
-When a pull request is opened on a connected repository, GitHub sends a webhook to CodePulse. The system verifies the webhook signature, checks for duplicates, and kicks off a background analysis pipeline. That pipeline fetches the PR diff, runs both AST and LLM analysis in parallel, deduplicates the findings, and posts the results as GitHub review comments.
-
-### High-Level Architecture
+### 1. System Overview
 
 ```mermaid
-flowchart LR
-    GH["GitHub\n(Webhooks + API)"]
-    WS["Webhook Service\n(FastAPI)"]
-    RD[("Redis\n(Broker + Cache)")]
-    CW["Celery Workers"]
-    AST["AST Engine\n(tree-sitter)"]
-    LLM["Gemini API"]
-    AGG["Aggregator\n+ Dedup"]
-    PG[("PostgreSQL")]
+flowchart TD
+    subgraph GitHub ["GitHub Platform"]
+        PR["Developer Pull Request"]
+        GH_API["GitHub REST API\n(/pulls, /reviews)"]
+    end
 
-    GH -- "PR event\n(webhook)" --> WS
-    WS -- "Enqueue task" --> RD
-    WS -- "Upsert repo\n+ analysis_run" --> PG
-    RD -- "Consume" --> CW
-    CW -- "Fetch diff\n+ files" --> GH
-    CW --> AST
-    CW --> LLM
-    AST -- "Findings" --> AGG
-    LLM -- "Findings" --> AGG
-    AGG -- "Store" --> PG
-    AGG -- "Post review\ncomments" --> GH
+    subgraph Ingestion ["Ingestion Tier (FastAPI)"]
+        WEB["codepulse-web :8000\n- Signature Verification (HMAC-SHA256)\n- Redis Idempotency (SET NX)\n- DB Run Tracking"]
+        ADMIN["Admin API\n- /admin/retry-posting\n- Token Protected"]
+    end
+
+    subgraph Broker ["Message Broker & Storage"]
+        REDIS[("Redis 7.2 (Single-Primary)\n- Celery Queues\n- Token Bucket Rate Limiter\n- Circuit Breaker State\n- Pass-by-Reference Store")]
+        POSTGRES[("PostgreSQL 16\n- Repositories & Analysis Runs\n- Findings & Findings History\n- Dead Letter Log\n- Webhook Events Log")]
+    end
+
+    subgraph Workers ["Worker Tier (Celery Prefork)"]
+        W_HIGH["cp-high Queue\n- orchestrate_pr_analysis\n- scan_unposted_reviews"]
+        W_ANALYSIS["cp-analysis Queue\n- analyze_ast (tree-sitter)\n- analyze_llm (Gemini / Mock)"]
+        W_AGG["cp-aggregate Queue\n- aggregate_findings (Chord Callback)\n- deduplication & ranking\n- post_review_to_github\n- persist_results"]
+        W_RETRY["cp-retry Queue\n- GitHub secondary rate limit retries"]
+    end
+
+    subgraph Scheduler ["Periodic Sweeps (Celery Beat)"]
+        BEAT["codepulse-beat\n- scan_reanalysis_needed (every 5m)\n- scan_unposted_reviews (every 10m)\n- drain_pending_persistence (every 1m)"]
+    end
+
+    subgraph Observability ["Observability Stack"]
+        PROM["Prometheus :9092\n- 5s Scrapes (Web :9090, Worker :9091)\n- Recording Rules"]
+        GRAFANA["Grafana :3000\n- Dashboards: Health, Findings, Resilience, Logs"]
+        LOKI["Loki :3100\n- Structured JSON Logs\n- Sanitized & Secret-Redacted"]
+        ALLOY["Grafana Alloy\n- Container Log Discovery & Ingestion"]
+    end
+
+    PR -->|Webhook POST /webhooks| WEB
+    WEB -->|Enqueue Orchestration| REDIS
+    WEB -->|Create Run Record| POSTGRES
+    REDIS --> W_HIGH
+    REDIS --> W_ANALYSIS
+    REDIS --> W_AGG
+    REDIS --> W_RETRY
+    BEAT -->|Enqueue Due Tasks| REDIS
+
+    W_HIGH -->|Fetch Diff| GH_API
+    W_AGG -->|Post Review & Comments| GH_API
+    W_AGG -->|Store Findings & Status| POSTGRES
+    ADMIN -->|Retry Exhausted Review| W_AGG
+
+    WEB -.->|Metrics :9090| PROM
+    Workers -.->|Metrics :9091| PROM
+    Workers -.->|Structured JSON Logs| ALLOY
+    WEB -.->|Structured JSON Logs| ALLOY
+    ALLOY --> LOKI
+    PROM --> GRAFANA
+    LOKI --> GRAFANA
 ```
 
-### Pipeline Sequence
+---
 
-This shows the full lifecycle of a single pull request event, from webhook receipt to review comments appearing on GitHub:
+### 2. PR-to-Review Sequence
 
 ```mermaid
 sequenceDiagram
+    autonumber
     participant GH as GitHub
-    participant WS as Webhook Service
-    participant RD as Redis
-    participant CW as Celery Worker
-    participant AST as AST Engine
-    participant LLM as Gemini API
-    participant PG as PostgreSQL
+    participant W as Web (FastAPI)
+    participant R as Redis
+    participant DB as PostgreSQL
+    participant CW as Celery Workers
+    participant LLM as Google Gemini (or Mock)
 
-    GH->>WS: POST /webhooks (PR event)
-    WS->>WS: Verify HMAC-SHA256 signature
-    WS->>RD: SET NX idempotency check
-    alt Duplicate
-        RD-->>WS: Key exists
-        WS-->>GH: 200 OK (skip)
-    else New event
-        RD-->>WS: Key set
-        WS->>PG: Upsert repo + create analysis_run
-        WS->>RD: Enqueue orchestrate_pr_analysis
-        WS-->>GH: 202 Accepted
+    GH->>W: POST /webhooks (pull_request event)
+    W->>W: Verify HMAC-SHA256 signature
+    W->>R: SET NX idempotency lock (delivery_id)
+    alt Duplicate Event
+        R-->>W: Key already exists
+        W-->>GH: 200 OK (Duplicate ignored)
+    else New Event
+        W->>DB: Upsert repository & insert analysis_run (status=pending)
+        W->>R: Enqueue orchestrate_pr_analysis (cp-high)
+        W-->>GH: 202 Accepted
     end
 
-    RD->>CW: Deliver task
-    CW->>GH: Fetch PR diff + file contents
-    CW->>CW: Chunk files by function/class
+    R->>CW: orchestrate_pr_analysis
+    CW->>GH: fetch_pr_diff (pull request unified diff)
+    CW->>CW: preprocess_and_chunk (filter lock/vendor files, chunk by AST nodes)
+    CW->>R: Store diff & chunks (pass-by-reference)
 
-    par Static Analysis
-        CW->>AST: Parse chunks with tree-sitter
-        AST-->>CW: AST findings
-    and LLM Analysis
-        CW->>LLM: Send chunks + prompt
-        LLM-->>CW: LLM findings
+    Note over CW,LLM: Celery Chord: Parallel Analysis
+    par Static AST Analysis
+        CW->>CW: analyze_ast (tree-sitter Python & JS/TS heuristics)
+    and Semantic LLM Analysis
+        CW->>R: Acquire Rate Limit Token (324 RPM token bucket)
+        CW->>R: Check Circuit Breaker (CLOSED / HALF_OPEN)
+        CW->>LLM: analyze_llm (structured JSON schema prompt)
+        LLM-->>CW: LLM findings + token usage
     end
 
-    CW->>CW: Aggregate + deduplicate
-    CW->>PG: Store findings
-    CW->>GH: Post review comments
-    CW->>PG: Update analysis_run status
+    CW->>CW: aggregate_findings (Chord callback)
+    CW->>CW: Deduplicate on (file, line, category, family) & rank by severity
+    CW->>CW: Line mapping (verify lines in diff hunks, 256 finding cap)
+    CW->>GH: post_review_to_github (atomic review with inline comments)
+    CW->>DB: persist_results (findings, run status=completed, review_posted_at)
 ```
 
-### Database Schema
+---
 
-Six tables track everything from repository metadata to individual findings and operational telemetry:
+### 3. Failure & Graceful Degradation Paths
 
 ```mermaid
-erDiagram
-    repositories ||--o{ analysis_runs : "has many"
-    analysis_runs ||--o{ findings : "produces"
-    analysis_runs ||--o{ llm_usage_log : "tracks"
+flowchart TD
+    START["Analysis Triggered"] --> DIFF["Fetch PR Diff"]
 
-    repositories {
-        bigserial id PK
-        bigint github_id UK
-        varchar full_name
-        bigint installation_id
-        varchar default_branch
-        varchar primary_language
-        timestamptz created_at
-        timestamptz updated_at
-    }
+    DIFF -->|Network error / 5xx| RETRY_DIFF["Retry (exp backoff, max 3)"]
+    RETRY_DIFF -->|Exhausted| DLQ_DIFF["Branch C: Dead-Letter Log\n- Record task in dead_letter_log\n- Set analysis_runs.status = 'failed'"]
 
-    analysis_runs {
-        uuid id PK
-        bigint repository_id FK
-        int pull_request_number
-        varchar head_sha
-        varchar base_sha
-        varchar pr_author
-        varchar status "pending|fetching|analyzing|posting|completed|failed"
-        int total_findings
-        boolean reanalysis_needed
-        timestamptz webhook_received_at
-        timestamptz completed_at
-        timestamptz created_at
-    }
+    DIFF -->|Success| CHORD["Parallel Analysis (Chord)"]
+    
+    subgraph GeminiBreaker ["Branch D: Gemini API Resiliency"]
+        CHORD --> CHECK_CB{"Circuit Breaker\nState?"}
+        CHECK_CB -->|OPEN| DEG_AST["Graceful Degradation to AST-Only\n- Skip LLM analysis\n- Mark reanalysis_needed = true\n- Append §6.4 degraded note to review"]
+        CHECK_CB -->|CLOSED / HALF_OPEN| RL_CHECK{"Rate Limiter\nToken Available?"}
+        RL_CHECK -->|No token| RL_RETRY["Retry countdown (jittered)"]
+        RL_RETRY -->|Exceeds 60s deadline| DEG_AST
+        RL_CHECK -->|Token granted| CALL_GEMINI["Execute Gemini API Call"]
+        CALL_GEMINI -->|5 consecutive failures| TRIP["Trip Circuit Breaker to OPEN\n(30s recovery timeout)"]
+        TRIP --> DEG_AST
+        CALL_GEMINI -->|Success| MERGE
+    end
 
-    findings {
-        uuid id PK
-        uuid analysis_run_id FK
-        varchar file_path
-        int line_start
-        int line_end
-        varchar severity "critical|high|medium|low|info"
-        varchar category
-        varchar title
-        text explanation
-        text suggested_fix
-        text remediation
-        varchar confidence "high|medium|low"
-        varchar source "ast|llm"
-        boolean is_posted
-        timestamptz created_at
-    }
+    DEG_AST --> MERGE["Aggregate & Deduplicate Findings"]
+    
+    MERGE --> POST["Post Review to GitHub"]
 
-    llm_usage_log {
-        bigserial id PK
-        uuid analysis_run_id FK
-        varchar model_version
-        int input_tokens
-        int output_tokens
-        int latency_ms
-        boolean cache_hit
-        timestamptz created_at
-    }
+    subgraph GitHubPosting ["Branch F: Review Posting Resiliency"]
+        POST -->|422 Unprocessable (line outside diff)| FALLBACK_422["Fallback to Top-Level Body\n- Convert comments to bullet list\n- Post review with comments = []"]
+        POST -->|GitHub 5xx / connection error| RETRY_POST["Retry (exp backoff, max 5)"]
+        RETRY_POST -->|Exhausted| DLQ_POST["Branch F: Durable Dead-Letter Persistence\n- Persist review payload in dead_letter_log\n- Keep findings in Postgres\n- analysis_runs.review_posted_at = NULL"]
+    end
 
-    dead_letter_log {
-        bigserial id PK
-        varchar task_name
-        uuid task_id
-        jsonb task_args
-        varchar exception_type
-        text exception_message
-        int retry_count
-        boolean resolved
-        timestamptz created_at
-    }
+    subgraph DatabaseRecovery ["Branch G: PostgreSQL Outage Resiliency"]
+        POST --> PERSIST["Persist Findings & Run Status"]
+        PERSIST -->|Database connection failure| REDIS_BUFFER["Buffer to Redis Queue\n'codepulse:pending_persistence'"]
+    end
 
-    webhook_events_log {
-        bigserial id PK
-        uuid delivery_id UK
-        varchar event_type
-        varchar action
-        varchar repository_full_name
-        boolean processed
-        boolean duplicate
-        timestamptz received_at
-    }
+    subgraph PeriodicRecovery ["Celery Beat Periodic Sweeps"]
+        DEG_AST -.->|Periodic 5m sweep| BEAT_REANALYZE["tasks.scan_reanalysis_needed\n- Checks breaker CLOSED\n- Checks PR head SHA unchanged\n- Runs LLM & posts follow-up review\n- Clears reanalysis_needed = false"]
+        DLQ_POST -.->|Periodic 10m sweep or Admin API| BEAT_REPOST["tasks.scan_unposted_reviews\n- Loads durable Branch F payload\n- Checks PR head SHA unchanged\n- Posts review & sets review_posted_at\n- Marks dead_letter_log resolved = true"]
+        REDIS_BUFFER -.->|Periodic 1m sweep| BEAT_DRAIN["tasks.drain_pending_persistence\n- Replays buffered findings into PostgreSQL"]
+    end
 ```
 
-The `analysis_runs` table has a unique constraint on `(repository_id, pull_request_number, head_sha)` which serves as a database-level idempotency fallback — even if Redis misses a duplicate, the DB will catch it.
+---
+
+## System Implementation & Verification Status
+
+| Subsystem / Feature | Implemented | Verified with Mocks | Verified Live | Status / Architecture Notes |
+| :--- | :---: | :---: | :---: | :--- |
+| **Ingestion Service (FastAPI)** | ✅ | ✅ | 🔲 | HMAC-SHA256 signature verification, idempotency locks, repo upsert. Live GitHub delivery pending. |
+| **AST Analysis Engine (tree-sitter)** | ✅ | ✅ | N/A | 17 heuristic rules across Python and JavaScript/TypeScript. Deterministic AST parsing. |
+| **LLM Analysis Engine (Gemini)** | ✅ | ✅ | 🔲 | Structured output via `google-genai` SDK and `MockLLMClient`. Live Gemini API credentials pending. |
+| **Deduplication & Ranking** | ✅ | ✅ | N/A | Deduplication on `(file, line, category, family)`. 256 finding cap preserving all criticals. |
+| **GitHub Review Client** | ✅ | ✅ | 🔲 | RS256 JWT generation, token exchange, atomic reviews. MockGitHubPoster verified; live API pending. |
+| **Celery Pipeline & Worker Service** | ✅ | ✅ | N/A | Prefork workers on dedicated queues (`cp-high`, `cp-analysis`, `cp-aggregate`, `cp-retry`). |
+| **Rate Limiter (Gemini)** | ✅ | ✅ | N/A | Redis Lua token bucket (324 RPM, burst 10) with jittered retries and wait deadline degradation. |
+| **Circuit Breakers (Gemini & GitHub)** | ✅ | ✅ | N/A | Spec §6.3 circuit breakers tracking failures, tripping to OPEN, and probing in HALF_OPEN. |
+| **Graceful Degradation (§6.4)** | ✅ | ✅ | N/A | Degrades to AST-only when breaker OPEN or deadline exceeded; auto-recovered by Celery Beat sweep. |
+| **Dead-Letter Handling & Admin Retry** | ✅ | ✅ | N/A | Durable review payloads stored in `dead_letter_log`; retryable via Beat or `POST /admin/retry-posting`. |
+| **Observability (Metrics & Dashboards)** | ✅ | ✅ | N/A | Prometheus v3 scraping isolated internal ports (9090, 9091) + 4 provisioned Grafana dashboards. |
+| **Observability (Logs & Redaction)** | ✅ | ✅ | N/A | Structured JSON logs shipped to Loki v3 via Alloy; automated secret & diff redactor in pipeline. |
+| **Redis Architecture** | ✅ | ✅ | N/A | **Spec Deviation (DEC-016):** Single-primary Redis replaces Redis Cluster because Celery does not support Cluster. |
 
 ---
 
-## What's Implemented
-
-### Phase 1 — Project Skeleton + Data Model
-
-- **Poetry** for dependency management (Python 3.12, FastAPI, Celery, SQLAlchemy, Alembic, Redis, Pydantic)
-- **Docker Compose** with PostgreSQL 16 and Redis 7.2 for local development
-- **Alembic migrations** creating all 6 tables with proper constraints, indexes, and foreign keys
-- **SQLAlchemy ORM models** with full relationship mappings
-- **Pydantic settings** loading all configuration from environment variables
-- **30 unit tests** validating model metadata, constraints, and instantiation
-
-### Phase 2 — Webhook Ingestion Service
-
-- **`POST /webhooks`** endpoint implementing the full ingestion flow:
-  - HMAC-SHA256 signature verification with constant-time comparison
-  - Event filtering (accepts `pull_request` opened/synchronize/reopened; handles `ping`)
-  - Redis-based idempotency (`SET NX` with 1-hour TTL)
-  - Database-level idempotency fallback (`ON CONFLICT DO NOTHING`)
-  - Repository upsert and `analysis_runs` row creation
-  - Celery task enqueue to `cp-high` queue
-- **Health endpoints** (`/health/live`, `/health/ready`)
-- **Celery worker stub** (task defined, actual pipeline wiring is Phase 6)
-- **28 unit tests** covering signatures, filtering, idempotency, task enqueue, and logging
-
-### Phase 3 — AST Analysis Engine (Python + JS/TS)
-
-- **`analyze_chunk(source, filename, modified_lines=…)`** — main entry point that detects language from extension, parses via tree-sitter, runs all applicable heuristics, and returns structured `ASTFinding` objects
-- **Language registry** supporting Python (`.py`, `.pyi`), JavaScript (`.js`, `.jsx`, `.mjs`, `.cjs`), TypeScript (`.ts`), TSX (`.tsx`)
-- **17 AST heuristic rules** covering OWASP Top 10 and memory leak patterns:
-  - *Python (12 rules):* SQL injection, eval/exec, command injection, empty except, hardcoded secrets, weak crypto, DEBUG mode, bind 0.0.0.0, pickle/yaml deserialization, logging sensitive data, JWT verify disabled, SSRF, unclosed file handles
-  - *JS/TS (7 rules):* eval, SQL injection, innerHTML XSS, empty catch, hardcoded secrets, logging sensitive data, addEventListener leaks
-- **Diff-aware filtering** — restricts findings to only lines that were actually changed in the diff
-- **69 unit tests** — each heuristic tested with both vulnerable (must fire) and clean (must stay silent) code, plus integration tests against multi-pattern fixture files
-
-### Phase 4 — LLM Analysis Engine (Gemini)
-
-- **`analyze_llm(chunks, repo_name, language)`** — constructs a structured prompt, calls Gemini (or mock), validates response against Pydantic schema, remaps OWASP categories, and filters findings by file path
-- **Prompt construction** with four sections per §3.4.2: system instruction, repo context, CODE_DIFF-wrapped chunks, analysis directives
-- **Prompt injection defenses** (§3.4.7): input/instruction separation, structured output enforcement, CODE_DIFF wrapping, output file-path validation, no tool use
-- **`MockLLMClient`** — pattern-aware mock detecting 7 vulnerability categories (SQL injection, eval, hardcoded secrets, weak hashing, deserialization, empty exceptions, memory leaks) with realistic canned responses
-- **`GeminiClient`** — real `google-genai` SDK integration with structured output mode (used when `MOCK_LLM=false` + `GEMINI_API_KEY` set)
-- **OWASP category remapping** (§3.4.4) — non-standard LLM categories remapped via keyword lookup, originals preserved in `raw_category`
-- **Error handling** — retry-once on schema validation failure, then fallback to `llm_error` status
-- **54 unit tests** covering prompt construction, schema parsing, category remapping, mock client patterns, output validation, error handling, and end-to-end integration
-
-### Phase 5 — Aggregation, Deduplication & GitHub Review Posting
-
-- **`aggregate_and_post(ast_findings, llm_findings, diff_text, repo_context)`** — pipeline orchestrator combining AST and LLM findings into a single atomic GitHub PR review
-- **Unified Finding model** (`src/codepulse/aggregation/models.py`) adapting `ASTFinding` and `LLMFindingItem` into normalized dataclasses
-- **Deduplication & collision merging** (`src/codepulse/aggregation/dedup.py`) on `(file_path, line_start, category, title)`:
-  - Higher confidence finding wins
-  - Losing source is attributed as `"Also detected by {source}."`
-  - Source marked as `"merged"`
-- **Severity sorting & 256-finding cap**:
-  - Prioritizes critical findings first (`critical` > `high` > `medium` > `low`), then file path and line number
-  - Strictly enforces invariant that **critical findings are never dropped** while non-critical findings remain
-- **Diff line mapping** (`src/codepulse/aggregation/line_mapping.py`):
-  - Parses unified diff hunks (`@@ -old,count +new,count @@`)
-  - Maps multi-line findings (`line_start`/`line_end`)
-  - Remaps context-line findings to nearest modified line with an explanatory note
-  - Marks out-of-hunk findings as unmapped for top-level display
-- **Review comment and summary formatting**:
-  - Inline comments with severity emoji badges (🔴, 🟠, 🟡, 🔵), OWASP labels, and GitHub `suggestion` blocks
-  - Top-level review body with severity breakdown, analysis metrics table, truncation notices, and collapsible methodology disclosure
-- **GitHub Review API client & mock mode** (`src/codepulse/aggregation/github_poster.py`):
-  - Posts atomic reviews via `POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews` with `event="COMMENT"` (§3.6.1, §3.6.2)
-  - `MockGitHubPoster` strictly validates payload keys (`event`, `body`, `comments[].path/line/side/body`) and records reviews in memory under `MOCK_GITHUB=true`
-  - Production `GitHubPoster` uses `httpx` with GitHub App bearer token authentication
-- **33 unit tests** covering adapters, collision merging, sorting, 256 cap invariant, line mapping, comment formatting, summary generation, payload validation, and end-to-end posting
-
-### Phase 6 — Celery Task Orchestration, Pipeline & Worker Service
-
-- **Phase 6a — Diff Ingestion, Preprocessing & Persistence**:
-  - **`DiffFetcher`** (`src/codepulse/ingestion/diff_fetcher.py`): Fetches PR diffs and file contents via GitHub REST API with App authentication and RS256 JWT generation; includes deterministic mock mode for local testing.
-  - **Preprocessor & Chunking** (`src/codepulse/ingestion/preprocessor.py`): Filters generated, vendor, and lock files, checks size/line thresholds, and chunks changed files by top-level AST function/class definitions for AST heuristics and LLM prompts.
-  - **PostgreSQL Persistence** (`src/codepulse/aggregation/persistence.py`): `persist_analysis_results()` atomically and idempotently stores findings and updates `analysis_runs` status and counters.
-  - **Category Normalization** (`src/codepulse/aggregation/models.py`): Normalizes AST and LLM categories to canonical OWASP keys (`A01`–`A10`, `memory_leak`), falls back safely to `A04` with warnings and preserves `raw_category`.
-  - **27 unit & integration tests** (`tests/test_phase6a.py`) validating diff fetching, preprocessing, chunking, and database persistence.
-- **Phase 6b — Celery Task Orchestration & Worker Service**:
-  - **Celery Application** (`src/codepulse/worker/celery_app.py`): Configures Redis broker/backend and queue routing for `cp-high`, `cp-analysis`, and `cp-aggregate`.
-  - **8 Celery Pipeline Tasks** (`src/codepulse/worker/tasks.py`):
-    1. `orchestrate_pr_analysis`: Coordinates the PR analysis workflow via task chaining and chord construction.
-    2. `fetch_pr_diff`: Fetches PR diff and file contents via `DiffFetcher`.
-    3. `preprocess_and_chunk`: Filters files, handles all-filtered diffs with `status="skipped"`, and chunks diff content.
-    4. `analyze_ast_task`: Runs AST analysis engine over chunks on `cp-analysis`.
-    5. `analyze_llm_task`: Runs Gemini LLM analysis engine over chunks on `cp-analysis`.
-    6. `aggregate_findings`: Celery chord callback executing inline Tier 2 escalation and finding deduplication on `cp-aggregate`.
-    7. `post_review_to_github`: Posts atomic review to GitHub API, resiliently catching posting errors to prevent finding loss.
-    8. `persist_results`: Sole persistence task calling `persist_analysis_results` with a real DB session.
-  - **Docker Compose Worker**: Dedicated worker container consuming `cp-high,cp-analysis,cp-aggregate` queues.
-  - **14 unit & integration tests** (`tests/test_pipeline.py`) covering task execution, eager-mode full chain, posting failure recovery, and skipped empty diffs.
-
-### Phase 7a — Pass-by-Reference Pipeline, Retries, Dead-Letter Handling & Admin Retry
-
-- **Pass-by-Reference Pipeline** (`src/codepulse/worker/tasks.py`, `src/codepulse/persistence/database.py`): Diffs, patches, and review payloads stored in Redis with 24h TTL; tasks pass lightweight string references.
-- **Retry Policies & Timeouts** (`src/codepulse/worker/celery_app.py`, `src/codepulse/worker/tasks.py`): Task-specific exponential backoffs and Celery soft/hard execution limits matching §3.5.3 and §3.5.5.
-- **Dead-Letter Handling & Recovery**:
-  - **Branch C**: Diff fetch retries with backoff; exhausted failures logged to `dead_letter_log` and mark run `failed`.
-  - **Branch F**: Review posting retries up to 5 times; on exhaustion, durable review payload is stored in `dead_letter_log.task_args` while findings remain committed to Postgres.
-  - **Branch G**: Persistence retries with backoff; on DB outage, findings fall back to Redis queue `codepulse:pending_persistence` for replay via `recover_pending_persistence()`.
-  - **Branch H**: Celery configured with `task_acks_late=True`, `worker_prefetch_multiplier=1`, and `visibility_timeout=300`. Configured and idempotent; crash redelivery not demonstrated.
-- **Admin Retry Endpoint** (`src/codepulse/ingestion/admin.py`): `POST /admin/retry-posting/{analysis_run_id}` with constant-time bearer token authentication against `ADMIN_API_KEY`.
-- **Worker Log Privacy**: Zero customer code or diff hunks logged; Celery trace logging format sanitized.
-- **11 unit & integration tests** (`tests/test_phase7a.py`) covering configuration, reference passing, dead-letter persistence, admin retry, and log privacy.
-
-### Phase 7b — Rate Limiting, Caching, Circuit Breaker & Graceful Degradation
-
-- **Gemini Rate Limiter** (`src/codepulse/analysis/rate_limiter.py`): Distributed sliding token bucket via atomic Redis Lua script enforcing 324 RPM (360 RPM - 10% safety margin per §3.4.6, §11) with burst 10 tokens. Reschedules tasks with exact countdown without worker blocking.
-- **Circuit Breaker** (`src/codepulse/analysis/circuit_breaker.py`): 3-state breaker (`CLOSED`, `OPEN`, `HALF_OPEN`) via atomic Redis Lua scripts per §6.3. Implemented exclusively for Gemini API (`api="gemini"`). Trips to `OPEN` on 5 failures within 60s; recovers to `HALF_OPEN` probe after 30s. *Note:* Per §6.4 and §10.2, GitHub API resilience does NOT use a circuit breaker; it is handled via Celery retries and the dead-letter log (a GitHub circuit breaker is explicitly not implemented).
-- **LLM Response Caching** (`src/codepulse/worker/tasks.py`): Response cache keyed by `llm_cache:{sha256(version:model_id:prompt_text)}` with 24-hour TTL (§3.4.5, §3.7.2). Hits recorded as `cache_hit=True` with zero token consumption.
-- **Graceful Degradation & Re-analysis** (`src/codepulse/aggregation/summary.py`, `src/codepulse/worker/tasks.py`):
-  - When LLM analysis is unavailable, reviews post in degraded mode (AST-only) with disclaimer alert (§6.4) and `reanalysis_needed=True`.
-  - Celery Beat scheduled periodic task `tasks.scan_reanalysis_needed` runs every 5 minutes (300s) to re-analyze degraded runs using Option A delivery: merges matching LLM findings into AST findings and posts follow-up review with new findings only.
-  - Celery Beat scheduled periodic task `tasks.drain_pending_persistence_task` runs every 60s to recover and persist fallback data from Redis.
-- **GitHub Rate Limit Handling (`cp-retry`)** (`src/codepulse/worker/tasks.py`): Tasks encountering GitHub remaining quota < 100 are rescheduled to `cp-retry` with `eta` at reset timestamp.
-- **18 unit & integration tests** (`tests/test_phase7b.py`) covering rate limiter retry scheduling, response cache invalidation/telemetry, circuit breaker transitions, degraded review formatting, re-analysis merging/supersession, attempt caps, rate limit jitter, wait deadline fallback, and follow-up review resilience. Total test suite: **330 tests**.
-
-### Phase 8a-i — Metrics, Prometheus, and Grafana Dashboards
-
-- **13 Canonical Prometheus Metrics (§9.2, DEC-016, DEC-017)** (`src/codepulse/metrics/registry.py`):
-  - Counters, Histograms, and Gauges tracking webhook intake, pipeline execution, chunk distribution, findings by severity/category/source, LLM token consumption/costs/latency, circuit breaker state, dead-letter entries, and GitHub API interactions.
-  - Latency p99 implemented via Prometheus recording rule `codepulse_analysis_latency_p99` over `codepulse_end_to_end_duration_seconds`.
-- **Metric Label Cardinality & Security Boundary** (`src/codepulse/metrics/labels.py`):
-  - Strict 200 distinct-value cap (`LabelLimiter`, configurable via `METRIC_LABEL_CAP`) on dynamic label dimensions (`repository`, `endpoint`, `installation_id`), mapping overflow to `"other"` to prevent TSDB index exhaustion.
-  - Enforced security exclusion of unbounded or sensitive dimensions: file paths, PR numbers, delivery UUIDs, commit SHAs, rule titles, and source code fragments are strictly forbidden as labels.
-- **Dedicated Internal Exporters & Port Isolation**:
-  - Web metrics exposed on dedicated internal port `9090` (`http://web:9090/metrics`).
-  - Celery worker metrics aggregated across 4 prefork processes via `MultiProcessCollector` and `/tmp/prometheus_multiproc`, served on internal worker port `9091` (`http://worker:9091/metrics`).
-  - Internal metrics ports 9090 and 9091 are isolated on the container network and not exposed on host interfaces. Public application port `8000` returns `404 Not Found` for `/metrics`.
-- **Automated Provisioning & Dashboards** (`docker-compose.yml`, `deploy/`):
-  - Prometheus (`prom/prometheus:v2.54.1`) on port `9092` (`http://127.0.0.1:9092`) scraping web and worker instances at 5s intervals.
-  - Grafana (`grafana/grafana:11.2.0`) on port `3000` (`http://127.0.0.1:3000`) authenticated via `GRAFANA_ADMIN_PASSWORD` (anonymous access disabled) with persistent volumes and 3 pre-provisioned dashboards:
-    1. **Pipeline Health**: Webhook ingestion rates, active analysis runs, end-to-end duration, and p99 latency.
-    2. **Findings & LLM**: Finding count by severity/source, token usage, cost estimates, and cache hit ratios.
-    3. **Resilience**: Rate limiter delays, circuit breaker state, retry queues, and dead-letter log counters.
-- **14 unit tests** (`tests/test_metrics.py`). Total test suite: **348 tests**.
-
-### Phase 8a-ii — Structured Logging, Distributed Tracing, Loki, and Alloy
-
-- **Distributed Tracing & W3C Trace Context (§9.3, DEC-018)** (`src/codepulse/observability/tracing.py`):
-  - 16-byte (32 lowercase hex characters) trace ID and 8-byte (16 lowercase hex characters) span ID generation conforming to W3C Trace Context specification.
-  - HTTP middleware in `codepulse-web` extracting incoming `traceparent` or `X-Trace-Id` headers (or generating new trace IDs), binding to `contextvars`, and attaching `X-Trace-Id` to all responses.
-  - Dual trace propagation into Celery pipeline via task headers (`trace_id`, `span_id`) and task payload context.
-  - Celery `task_prerun` and `task_postrun` signal handlers propagating trace metadata across all pipeline tasks (`orchestrate_pr_analysis`, `fetch_pr_diff`, `preprocess_and_chunk`, `analyze_ast`, `analyze_llm`, `aggregate_findings`, `post_review_to_github`, `persist_results`).
-- **Structured JSON Logging Schema (§9.4, DEC-018)** (`src/codepulse/observability/formatter.py`, `setup.py`):
-  - `JSONLogFormatter` generating one-line JSON containing all mandatory fields: `timestamp`, `level`, `service`, `logger`, `message`, `trace_id`, `span_id`, `analysis_run_id`, `repository`, `pr_number`, `task_name`, `task_id`, `head_sha`, and `exception`.
-  - Configured across FastAPI uvicorn loggers, Celery worker loggers, and Celery beat loggers with service name tagging (`codepulse-web`, `codepulse-worker`, `codepulse-beat`).
-- **Log Sanitization & Secret Redaction Filter (§9.4, DEC-018)** (`src/codepulse/observability/redaction.py`):
-  - `SecretAndCodeSanitizer` logging filter automatically intercepting log records to redact Gemini API keys (`AIza...`), GitHub classic & fine-grained PATs (`ghp_...`, `github_pat_...`), HTTP Bearer tokens, JWTs, database connection string passwords, private keys, and unified diff patches (`diff --git`, `@@ -... @@`).
-  - Prohibits customer source code and raw diff chunks from appearing in logs.
-- **Port Isolation & Redis Security (DEC-022)**:
-  - `postgres` (5432) and `redis` (6379) bound strictly to `127.0.0.1`. Web port 8000 remains accessible on `0.0.0.0` for inbound webhook tunnels.
-  - Redis authentication enforced via `--requirepass` with authenticated Celery and cache URLs.
-- **Component Version Upgrades & Image Digest Pinning (DEC-019, DEC-020)**:
-  - Pinned all six external container images by exact immutable SHA-256 digest (`postgres:16.15-alpine`, `redis:7.2.17-alpine`, `prom/prometheus:v3.15.1`, `grafana/grafana:13.3.0`, `grafana/loki:3.7.9`, `grafana/alloy:v1.21.2`).
-- **Loki & Grafana Alloy Telemetry Pipeline** (`deploy/loki/`, `deploy/alloy/`, `docker-compose.yml`):
-  - Grafana Loki 3.7.9 configured with single-binary TSDB v13 schema and filesystem chunk storage on `127.0.0.1:3100`.
-  - Grafana Alloy v1.21.2 collector discovering local Docker containers via `/var/run/docker.sock:ro`, parsing JSON log entries, extracting low-cardinality structured labels (`service`, `level`, `container`), and shipping batches to Loki.
-  - *Security Warning:* Mounting `/var/run/docker.sock:ro` does NOT protect the host (the Docker API stream protocol allows mutating POST/exec commands granting effective host root access); this is accepted solely as a local Compose development convenience. Production deployments must use DaemonSets scraping node logs (`/var/log/pods`) or a restricted read-only socket proxy (`tecnativa/docker-socket-proxy`).
-  - `trace_id` is excluded from index labels to prevent high-cardinality stream explosion; queries filter via LogQL JSON parsing (`| json | trace_id = "..."`).
-  - Provisioned Grafana Loki datasource (`LOKI_DEFAULT`) and `Application Logs` dashboard (`application-logs`).
-- **17 unit & integration tests** (`tests/test_logging.py`, `tests/test_phase7b.py`, `tests/test_phase7a.py`). Total test suite: **365 tests**.
-
----
-
-## Getting Started
+## Quick Start (Fresh Machine)
 
 ### Prerequisites
+- **Docker & Docker Compose** (Docker Desktop on macOS/Windows, or Docker Engine 24+ on Linux)
+- **Python 3.12+** (for running client test scripts on host, optional)
+- **curl** and **jq** (for testing endpoints and metrics)
 
-- **Docker Desktop** (for PostgreSQL, Redis, and the web service)
-- **Python 3.12+** (for running tests locally)
-- **Poetry** (`pip install poetry`)
-
-### Run the Stack
-
+### 1. Clone & Configure
 ```bash
-# Start everything (Postgres + Redis + migration + web service)
-docker compose up --build -d
+git clone https://github.com/bearAtharv/codepulse-ai.git
+cd codepulse-ai
 
-# Check health
-curl http://localhost:8000/health/live    # → {"status":"alive"}
-curl http://localhost:8000/health/ready   # → {"status":"ready"}
+# Copy development template
+cp .env.example .env
+```
+*(In mock mode, all default credentials in `.env.example` function out of the box for local development).*
+
+### 2. Launch the Application Stack
+```bash
+docker compose up -d --build
+docker compose ps
 ```
 
-### Test the Webhook Endpoint
+Verify service readiness:
+```bash
+curl -i http://127.0.0.1:8000/health/ready
+```
+Expected output: `HTTP/1.1 200 OK` with `{"status":"ready","database":"healthy","redis":"healthy"}`.
+
+### 3. Send a Test Pull Request Webhook
+Use the built-in CLI utility to send a valid, HMAC-signed webhook event:
 
 ```bash
-# Generate a signed payload (using the dev secret)
-SECRET="dev_webhook_secret_not_for_production"
-PAYLOAD='{"zen":"test"}'
-SIG="sha256=$(echo -n "$PAYLOAD" | openssl dgst -sha256 -hmac "$SECRET" | cut -d' ' -f2)"
-
-# Send a ping
-curl -X POST http://localhost:8000/webhooks \
-  -H "X-Hub-Signature-256: $SIG" \
-  -H "X-GitHub-Event: ping" \
-  -H "X-GitHub-Delivery: $(uuidgen)" \
-  -H "Content-Type: application/json" \
-  -d "$PAYLOAD"
-# → {"status": "pong"}
+python3 scripts/send_test_webhook.py --repo "my-org/demo-repo" --pr 42
+```
+Expected output:
+```
+[*] Target URL: http://127.0.0.1:8000/webhooks
+[*] Event: pull_request (opened)
+[*] Repository: my-org/demo-repo | PR: #42
+[*] Signature: sha256=... [REDACTED]
+[+] Response Status: 202 Accepted
 ```
 
-### Run Tests
-
+Inspect worker execution logs:
 ```bash
-# Install dev dependencies
-poetry install
+docker compose logs --tail=20 worker
+```
 
-# Run all tests (no Docker needed)
-PYTHONPATH=src python -m pytest tests/ -v
+Inspect database records:
+```bash
+docker compose exec postgres psql -U codepulse -d codepulse -c \
+  "SELECT id, status, review_posted_at, github_review_id, total_findings FROM analysis_runs ORDER BY created_at DESC LIMIT 1;"
+```
+
+### 4. Access Observability Dashboards
+- **Grafana**: [http://127.0.0.1:3000](http://127.0.0.1:3000) (Default user: `admin`, password from `.env`)
+  - *Dashboards included:* Pipeline Health, Findings & LLM, Resilience & Errors, Application Logs.
+- **Prometheus UI**: [http://127.0.0.1:9092](http://127.0.0.1:9092)
+
+### 5. Run the Test Suite
+Run unit, integration, and contract tests inside the isolated container:
+```bash
+docker compose run --rm web pytest
+```
+Or on the host with Python 3.12+:
+```bash
+PYTHONPATH=src pytest
 ```
 
 ---
 
-## Project Structure
+## Known Limitations & Architecture Decisions
 
-```
-src/codepulse/
-├── config.py                 # Pydantic settings (env vars, cached via @lru_cache)
-├── models/
-│   ├── __init__.py           # Re-exports Base + all table models
-│   └── tables.py             # SQLAlchemy DeclarativeBase + all 6 ORM models
-├── persistence/
-│   └── database.py           # Engine + session factory + get_db_session/get_redis_client
-├── ingestion/
-│   ├── app.py                # FastAPI application + liveness & readiness (503 on failure)
-│   ├── webhook.py            # POST /webhooks handler + inlined HMAC-SHA256 verification
-│   ├── service.py            # DB operations (upsert repo, create run, log event)
-│   ├── diff_fetcher.py       # GitHub PR diff & content fetcher (App auth + JWT + mock mode)
-│   └── preprocessor.py       # File filtering, threshold checks & AST/LLM chunking
-├── metrics/                  # Phase 8a-i: Prometheus metrics & exporters (§9.2, DEC-016)
-│   ├── __init__.py           # Re-exports metrics, labels, server
-│   ├── labels.py             # Label bounding (<=200 distinct), forbidden label checks
-│   ├── registry.py           # 13 canonical metrics, multiprocess exposition, recorders
-│   └── server.py             # Internal daemon metrics HTTP server
-├── worker/
-│   ├── celery_app.py         # Celery app configuration (queues: cp-high, cp-analysis, cp-aggregate)
-│   └── tasks.py              # Celery tasks (orchestration, diff, chunk, AST/LLM chord, aggregate, post, persist)
-├── analysis/
-│   ├── ast_engine.py         # analyze_chunk() entry point
-│   ├── languages.py          # Extension → tree-sitter parser registry
-│   ├── heuristics/
-│   │   ├── base.py           # ASTFinding dataclass + from_node() factory + tree helpers
-│   │   ├── python.py         # 12 Python OWASP and memory-leak heuristics
-│   │   └── javascript.py     # 7 JS/TS OWASP and memory-leak heuristics
-│   ├── llm_engine.py         # analyze_llm() + prompt builder + SHA-256 prompt hash
-│   ├── llm_client.py         # GeminiClient + production pattern-matching MockLLMClient
-│   └── llm_schemas.py        # Pydantic response schemas + OWASP remap
-├── aggregation/              # Phase 5 & 6a: dedup + line mapping + review posting + persistence
-│   ├── __init__.py           # Re-exports aggregate_and_post, Finding, posters, models
-│   ├── comments.py           # Inline comment markdown formatting + suggestion blocks
-│   ├── dedup.py              # Deduplication, confidence merge, 256-finding cap truncation
-│   ├── engine.py             # aggregate_and_post() orchestrator + Tier 2 escalation
-│   ├── github_poster.py      # GitHub Review API poster + MockGitHubPoster
-│   ├── line_mapping.py       # Diff hunk parser + line position remapping
-│   ├── models.py             # Finding, RepoContext, DeduplicationResult, AggregationResult, normalize_category
-│   ├── persistence.py        # persist_analysis_results() (idempotent DB persistence)
-│   └── summary.py            # Top-level review body composition + methodology disclosure
-└── common/                   # Shared utilities
+All non-trivial engineering trade-offs, deviations from early draft specifications, and architectural judgments are recorded in [DECISIONS.md](file:///Users/bear/SDE/CodePulse/DECISIONS.md). Key items include:
 
-tests/
-├── conftest.py               # Shared fixtures + autouse get_settings cache clearer
-├── fixtures/
-│   ├── python_vulnerable.py  # Known-vulnerable Python code
-│   ├── python_clean.py       # Known-clean Python code
-│   ├── javascript_vulnerable.js  # Known-vulnerable JS code
-│   └── javascript_clean.js   # Known-clean JS code
-├── test_models.py            # Phase 1 + Slice 6: 30 model tests (parameterized)
-├── test_webhook.py           # Phase 2 + Slice 5-6: 31 webhook & health tests
-├── test_ast_engine.py        # Phase 3 + Slice 6: 77 AST engine tests (parameterized)
-├── test_llm_engine.py        # Phase 4 + Slice 6: 54 LLM engine tests (parameterized)
-├── test_aggregation.py       # Phase 5: 34 aggregation, dedup, line mapping & posting tests
-├── test_phase6a.py           # Phase 6a: 51 diff fetcher, preprocessor & persistence tests
-├── test_phase7a.py           # Phase 7a: 13 reference-passing, retry & DLQ tests
-├── test_phase7b.py           # Phase 7b: 28 rate limit, circuit breaker, cache & degradation tests
-├── test_metrics.py           # Phase 8a-i: 14 metric registration, label limiter & export tests
-├── test_logging.py           # Phase 8a-ii: 15 structured logging, redaction & trace ID tests
-└── test_pipeline.py          # Phase 6b: 18 Celery pipeline, chord flow & worker tests
-```
+1. **Redis Cluster vs Single-Primary Redis (DEC-016):**
+   - *Draft spec called for Redis Cluster.*
+   - *Limitation:* The Celery Redis broker transport explicitly does not support Redis Cluster topology (Redis Cluster does not support cross-slot multi-key atomic transactions and `BLPOP` primitives required by Celery).
+   - *Resolution:* CodePulse AI deploys a dedicated, high-performance single-primary Redis 7.2 instance with Redis persistence (`appendonly yes`).
+2. **Table Partitioning Deferred (DEC-001):**
+   - PostgreSQL table partitioning on `analysis_runs` is deferred until database sizing benchmarks warrant partition maintenance overhead.
+3. **Graceful Degradation Formatting & Follow-Up Comments (DEC-014):**
+   - Section 6.4 exact phrasing is used: `"LLM analysis unavailable; AST-only results shown. Re-analysis will be triggered automatically when the service recovers."`
+   - Rendered as a GitHub blockquote with a warning badge. Re-analysis follow-up posts a single updated comment rather than replacing original reviews.
+4. **Rate Limit Wait Deadline (DEC-015):**
+   - If accumulated retry delays under severe Gemini API throttling exceed `GEMINI_RATE_LIMIT_DEADLINE` (default 60s), the analysis gracefully degrades to AST-only to prevent worker thread starvation.
+5. **Circuit Breaker Half-Open Transience (DEC-025):**
+   - The probe request in `HALF_OPEN` state executes in tens of milliseconds before returning to `CLOSED`. Due to Prometheus pull scrape intervals (5s), time-series graphs typically reflect a direct step between `1.0` (OPEN) and `0.0` (CLOSED). Redis (`circuit:gemini:state`) is the authoritative source.
+6. **Alloy Docker Socket Mount (DEC-021):**
+   - Grafana Alloy container socket mount (`/var/run/docker.sock:ro`) is used as a local Compose development convenience; Kubernetes deployments will use DaemonSets reading `/var/log/pods`.
 
 ---
 
-## Known Limitations
+## Reference Documentation
 
-- **Cross-Source Line-Number Offsets**: Deduplication and collision merging between AST heuristics and LLM semantic findings rely on exact line matching (`file_path`, `line_start`, `category`, and matching vulnerability family). In practice, LLM analysis may report a finding offset by one or two lines relative to AST-derived findings for the same vulnerability block. When lines do not match exactly, AST and LLM findings are posted as distinct comments rather than merged into a single attributed finding. A fuzzy line window was rejected to avoid false-positive merges across adjacent, distinct statements.
+- [docs/LIVE_SMOKE_TEST.md](file:///Users/bear/SDE/CodePulse/docs/LIVE_SMOKE_TEST.md): Detailed, step-by-step human runbook for Stage 1 (Mock LLM + Live GitHub) and Stage 2 (Live Gemini + Live GitHub) smoke tests against real cloud APIs.
+- [DECISIONS.md](file:///Users/bear/SDE/CodePulse/DECISIONS.md): Complete architecture decision records (DEC-001 through DEC-025).
+- [codepulse_ai_architecture.md](file:///Users/bear/SDE/CodePulse/codepulse_ai_architecture.md): Upstream foundational architecture specifications.
 
 ---
 
-## Design Decisions
+## License
 
-See [DECISIONS.md](DECISIONS.md) for a log of all architecture decisions, especially where the implementation diverges from or clarifies the architecture document.
+**License not chosen.** All rights reserved. Proprietary and confidential until an official open-source license is designated.
