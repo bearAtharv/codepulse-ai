@@ -78,6 +78,7 @@ services:
       GEMINI_RATE_LIMIT_DEADLINE: "${GEMINI_RATE_LIMIT_DEADLINE:-60.0}"
       MOCK_POSTING_FAILURE: "${MOCK_POSTING_FAILURE:-false}"
       MOCK_QUICK_RETRIES: "${MOCK_QUICK_RETRIES:-false}"
+      BEAT_UNPOSTED_REVIEWS_INTERVAL: "${BEAT_UNPOSTED_REVIEWS_INTERVAL:-600.0}"
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -114,6 +115,7 @@ services:
       GEMINI_RATE_LIMIT_DEADLINE: "${GEMINI_RATE_LIMIT_DEADLINE:-60.0}"
       MOCK_POSTING_FAILURE: "${MOCK_POSTING_FAILURE:-false}"
       MOCK_QUICK_RETRIES: "${MOCK_QUICK_RETRIES:-false}"
+      BEAT_UNPOSTED_REVIEWS_INTERVAL: "${BEAT_UNPOSTED_REVIEWS_INTERVAL:-600.0}"
     depends_on:
       postgres:
         condition: service_healthy
@@ -152,6 +154,7 @@ services:
       GEMINI_RATE_LIMIT_DEADLINE: "${GEMINI_RATE_LIMIT_DEADLINE:-60.0}"
       MOCK_POSTING_FAILURE: "${MOCK_POSTING_FAILURE:-false}"
       MOCK_QUICK_RETRIES: "${MOCK_QUICK_RETRIES:-false}"
+      BEAT_UNPOSTED_REVIEWS_INTERVAL: "${BEAT_UNPOSTED_REVIEWS_INTERVAL:-600.0}"
     depends_on:
       redis:
         condition: service_healthy

@@ -60,56 +60,56 @@ We execute testing in two strictly isolated stages:
 
 **Objective**: Verify real GitHub App RS256 JWT signing, installation access token exchange, PR diff retrieval over the GitHub API, AST heuristic analysis, and review posting with inline comments to GitHub, without incurring LLM API costs.
 
-#### 1. Configure Local Environment (`.env`)
-Edit your untracked `.env` file:
+#### 1. Exact Stage 1 `.env` Variable Names
+The following are the exact variable names used by CodePulse AI during Stage 1:
 
-```ini
-ENVIRONMENT=development
-SERVICE_NAME=codepulse
+- `ENVIRONMENT`
+- `SERVICE_NAME`
+- `POSTGRES_PASSWORD`
+- `DATABASE_URL`
+- `REDIS_PASSWORD`
+- `REDIS_URL`
+- `CELERY_BROKER_URL`
+- `CELERY_RESULT_BACKEND`
+- `MOCK_GITHUB`
+- `MOCK_LLM`
+- `GITHUB_APP_ID`
+- `GITHUB_APP_PRIVATE_KEY_PATH`
+- `GITHUB_WEBHOOK_SECRET`
+- `ADMIN_API_KEY`
+- `MOCK_LLM_FAILURE`
+- `MOCK_RATE_LIMIT`
+- `MOCK_GITHUB_RATE_LIMIT`
+- `MOCK_POSTING_FAILURE`
+- `MOCK_QUICK_RETRIES`
 
-# Database & Broker Credentials
-POSTGRES_PASSWORD=your_secure_postgres_password_here
-DATABASE_URL=postgresql://codepulse:your_secure_postgres_password_here@127.0.0.1:5432/codepulse
-REDIS_PASSWORD=your_secure_redis_password_here
-REDIS_URL=redis://:your_secure_redis_password_here@127.0.0.1:6379/0
-CELERY_BROKER_URL=redis://:your_secure_redis_password_here@127.0.0.1:6379/0
-CELERY_RESULT_BACKEND=redis://:your_secure_redis_password_here@127.0.0.1:6379/0
+> [!NOTE]
+> **Private Key Mounting:** The GitHub App RSA private key file must be placed in the local host directory `secrets/` (e.g. `secrets/github-app-key.pem`), which is mounted read-only into all containers at `/secrets/`. Inside Docker containers, `GITHUB_APP_PRIVATE_KEY_PATH` defaults to `/secrets/github-app-key.pem`. Ensure `chmod 600 secrets/github-app-key.pem` on the host.
 
-# GitHub App Live Credentials
-MOCK_GITHUB=false
-GITHUB_APP_ID=123456
-GITHUB_APP_PRIVATE_KEY_PATH=/absolute/path/to/secrets/github_app.pem
-GITHUB_WEBHOOK_SECRET=your_configured_webhook_secret_here
-ADMIN_API_KEY=your_secure_admin_api_key_here
+#### 2. PostgreSQL Password & Volume Migration
+When transitioning from `MOCK_GITHUB=true` (development mode allowing default password `codepulse_dev`) to `MOCK_GITHUB=false`, startup validation strictly rejects default credentials.
+- **Action Required:**
+  1. Define a secure, non-default `POSTGRES_PASSWORD` in `.env`.
+  2. Ensure `DATABASE_URL` matches this password: `postgresql://codepulse:${POSTGRES_PASSWORD}@postgres:5432/codepulse`.
+  3. If PostgreSQL was previously started with the default password, the existing Docker volume (`postgres_data`) retains the old password authentication database cluster.
+  4. Run `docker compose down -v` to destroy the stale PostgreSQL volume, then `docker compose up -d --build` to re-initialize the database with the new credentials.
+- **Data Lost:** All dev test run history, prior webhook operational logs, and ephemeral analysis records in PostgreSQL will be purged. (No production assets are lost as this is a local development/testing environment).
 
-# LLM in Mock Mode
-MOCK_LLM=true
-GEMINI_API_KEY=
-GEMINI_MODEL=gemini-3.7-flash
-
-# Ensure failure injection flags are false
-MOCK_LLM_FAILURE=false
-MOCK_RATE_LIMIT=false
-MOCK_GITHUB_RATE_LIMIT=false
-MOCK_POSTING_FAILURE=false
-MOCK_QUICK_RETRIES=false
-```
-
-#### 2. Run Preflight Dry-Run Check
+#### 3. Run Preflight Dry-Run Check
 Always run the offline preflight verification script before launching containers:
 ```bash
 python3 scripts/preflight_live.py
 ```
 This dry-run confirms that all required environment variables are set, your GitHub App private key parses as a valid RSA key, secrets adhere to security rules, and confirms `[STAGE 1] Live GitHub App Integration (Mock LLM Client)` without calling external APIs or printing secret values.
 
-#### 3. Start the Stack
+#### 4. Start the Stack
 ```bash
 docker compose down -v
 docker compose up -d --build
 docker compose ps
 ```
 
-#### 4. Open Test Pull Request
+#### 5. Open Test Pull Request
 In your test repository:
 1. Create and checkout a test branch:
    ```bash
@@ -118,6 +118,69 @@ In your test repository:
 2. Create or edit `src/app.py` with known vulnerability patterns on lines 1–2:
    ```python
    data = eval(user_input)
+   ```
+3. Commit and push:
+   ```bash
+   git add src/app.py
+   git commit -m "test: add eval vulnerability pattern for AST analysis"
+   git push origin test/codepulse-smoke-test-stage1
+   ```
+4. Open a Pull Request from `test/codepulse-smoke-test-stage1` to `main`.
+
+#### 6. What Success Looks Like
+
+##### A. Expected Container Log Output
+- **Web (`docker compose logs -f web`):**
+  ```json
+  {"timestamp": "...", "level": "INFO", "service": "codepulse-web", "logger": "codepulse.ingestion.webhook", "message": "Received webhook event=pull_request action=opened repo=your-org/your-repo delivery=... status=accepted"}
+  ```
+- **Worker (`docker compose logs -f worker`):**
+  ```json
+  {"timestamp": "...", "level": "INFO", "service": "codepulse-worker", "logger": "celery.worker.strategy", "message": "Task tasks.orchestrate_pr_analysis[...] received"}
+  {"timestamp": "...", "level": "INFO", "service": "codepulse-worker", "logger": "codepulse.worker.tasks", "message": "Fetching diff for your-org/your-repo#..."}
+  {"timestamp": "...", "level": "INFO", "service": "codepulse-worker", "logger": "codepulse.worker.tasks", "message": "Running AST analysis on 1 chunks"}
+  {"timestamp": "...", "level": "INFO", "service": "codepulse-worker", "logger": "codepulse.worker.tasks", "message": "Using MockLLMClient (MOCK_LLM=true)"}
+  {"timestamp": "...", "level": "INFO", "service": "codepulse-worker", "logger": "codepulse.worker.tasks", "message": "Aggregating findings for run ..."}
+  {"timestamp": "...", "level": "INFO", "service": "codepulse-worker", "logger": "codepulse.aggregation.github_poster", "message": "Using GitHubPoster (MOCK_GITHUB=false)"}
+  {"timestamp": "...", "level": "INFO", "service": "codepulse-worker", "logger": "codepulse.aggregation.github_poster", "message": "Posted review #<review_id> on your-org/your-repo#<pr_num> with 1 comments (event=COMMENT)"}
+  {"timestamp": "...", "level": "INFO", "service": "codepulse-worker", "logger": "celery.app.trace", "message": "Task tasks.post_review_to_github[...] succeeded"}
+  ```
+
+##### B. Expected PostgreSQL Rows
+Query PostgreSQL:
+```bash
+docker compose exec postgres psql -U codepulse -d codepulse -c \
+  "SELECT id, status, review_posted_at, github_review_id, error_message, reanalysis_needed FROM analysis_runs ORDER BY created_at DESC LIMIT 1;"
+```
+- `status`: `completed`
+- `review_posted_at`: Non-null ISO timestamp (e.g. `2026-11-01 17:05:00+00`)
+- `github_review_id`: Numerical GitHub Review ID returned by GitHub (e.g. `1982736450`)
+- `error_message`: `NULL`
+- `reanalysis_needed`: `f` (false)
+
+Verify findings status:
+```bash
+docker compose exec postgres psql -U codepulse -d codepulse -c \
+  "SELECT file_path, line_start, severity, category, is_posted FROM findings WHERE analysis_run_id = (SELECT id FROM analysis_runs ORDER BY created_at DESC LIMIT 1);"
+```
+- `is_posted`: `t` (true) for all generated findings.
+
+Verify dead letter queue:
+```bash
+docker compose exec postgres psql -U codepulse -d codepulse -c \
+  "SELECT id, task_name, resolved FROM dead_letter_log WHERE created_at >= NOW() - INTERVAL '1 hour';"
+```
+- Returns 0 rows (no failed tasks entered dead letter queue).
+
+#### 7. Troubleshooting Guide
+
+| Issue / Symptom | Root Cause | Remediation Procedure |
+| :--- | :--- | :--- |
+| **HTTP 401 Unauthorized** on webhook delivery | `X-Hub-Signature-256` mismatch: HMAC SHA-256 signature generated by GitHub using the configured secret does not match `GITHUB_WEBHOOK_SECRET` in `.env`. | Verify that the secret string configured under GitHub App **Settings > Webhook secret** matches `GITHUB_WEBHOOK_SECRET` in `.env` character-for-character. Restart web container: `docker compose restart web`. |
+| **HTTP 403 Forbidden: Installation Not Found or Suspended** | GitHub returns 403 when exchanging JWT for an installation token (`/app/installations/{id}/access_tokens`). The app is either not installed on the target repository, permissions are missing, or `GITHUB_APP_ID` is incorrect. | 1. Navigate to GitHub App settings -> **Install App** and confirm installation on the repository.<br>2. Confirm the numerical App ID in `.env` matches **App ID** on the GitHub App General page.<br>3. Check GitHub App permissions: ensure `Pull requests: Read & write` and `Contents: Read-only` are granted and accepted. |
+| **HTTP 422 Unprocessable Entity (Diff Hunk Lines)** | GitHub Review API rejects inline review comments because line numbers fall outside unified diff hunks (`@@ -x,y +x,y @@`) or reference unchanged lines. | CodePulse AI automatically detects HTTP 422 and triggers Branch F fallback: the review comments are converted into a consolidated top-level review body (`comments=[]`) so the review is posted successfully. Verify worker logs for `GitHub rejected inline comments (422); falling back to top-level review body`. |
+| **Tunnel Down / Connection Refused (GitHub Webhook Red Delivery)** | Local ingress forwarding tunnel (`smee`, `ngrok`, or `cloudflared`) disconnected, timed out, or crashed, causing GitHub webhook deliveries to fail with HTTP 502/504 or connection refused. | 1. Check tunnel terminal: restart `smee --url <url> --target http://127.0.0.1:8000/webhooks`.<br>2. Note the endpoint path is `/webhooks`.<br>3. In GitHub App settings, go to **Advanced > Recent Deliveries** and click **Redeliver** on the failed webhook. |
+ser_input)
    cursor.execute(f"SELECT * FROM users WHERE name = '{data}'")
    ```
 3. Commit, push, and open a PR against `main`:

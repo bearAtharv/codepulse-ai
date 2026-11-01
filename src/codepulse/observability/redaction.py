@@ -8,8 +8,8 @@ from typing import Any
 
 # Sensitive pattern definitions matching secrets, tokens, and diff contents
 SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
-    # Google / Gemini API keys (AIza prefix)
-    (re.compile(r"AIza[0-9A-Za-z\-_]{15,60}"), "[REDACTED_GEMINI_KEY]"),
+    # Google / Gemini API keys (AIza or AQ. prefix)
+    (re.compile(r"(?:AIza[0-9A-Za-z\-_]{15,60}|AQ\.[0-9A-Za-z\-_]{15,100})"), "[REDACTED_GEMINI_KEY]"),
     # GitHub App Installation Tokens (server-to-server)
     (re.compile(r"ghs_[A-Za-z0-9_]{10,255}"), "[REDACTED_GITHUB_INSTALLATION_TOKEN]"),
     # GitHub Personal Access Tokens (classic and fine-grained)

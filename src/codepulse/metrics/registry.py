@@ -105,11 +105,6 @@ LLM_CACHE_REQUESTS_TOTAL = Counter(
     "Total LLM cache requests by status (hit/miss)",
     ["status"],
 )
-LLM_CACHE_HIT_RATIO = Gauge(
-    "codepulse_llm_cache_hit_ratio",
-    "LLM cache hit ratio (0.0 to 1.0)",
-    registry=None,
-)
 
 # 7. LLM cost tracking & tokens
 LLM_TOKENS_CONSUMED = Counter(
@@ -201,7 +196,7 @@ CANONICAL_METRICS: Final[dict[str, Any]] = {
     "codepulse_analysis_duration_seconds": ANALYSIS_DURATION_SECONDS,
     "codepulse_end_to_end_duration_seconds": END_TO_END_DURATION_SECONDS,
     "codepulse_findings_total": FINDINGS_TOTAL,
-    "codepulse_llm_cache_hit_ratio": LLM_CACHE_HIT_RATIO,
+    "codepulse_llm_cache_hit_ratio": LLM_CACHE_REQUESTS_TOTAL,  # Canonical §9.2 metric produced exclusively by Prometheus recording rule from raw request counters
     "codepulse_llm_tokens_consumed_total": LLM_TOKENS_CONSUMED,
     "codepulse_llm_latency_seconds": LLM_LATENCY_SECONDS,
     "codepulse_github_api_calls_total": GITHUB_API_CALLS_TOTAL,
@@ -247,11 +242,6 @@ def record_analysis_phase_duration(phase: str, duration_seconds: float, reposito
     ANALYSIS_DURATION_SECONDS.labels(phase=phase, repository=bounded_repo).observe(duration_seconds)
 
 
-_cache_hits = 0
-_cache_total = 0
-_cache_lock = threading.Lock()
-
-
 def record_llm_telemetry(
     model: str,
     input_tokens: int,
@@ -260,7 +250,6 @@ def record_llm_telemetry(
     cache_hit: bool,
 ) -> None:
     """Record LLM inference telemetry."""
-    global _cache_hits, _cache_total
     cache_str = "true" if cache_hit else "false"
     latency_sec = latency_ms / 1000.0 if latency_ms else 0.0
 
@@ -276,13 +265,6 @@ def record_llm_telemetry(
 
     status_str = "hit" if cache_hit else "miss"
     LLM_CACHE_REQUESTS_TOTAL.labels(status=status_str).inc()
-
-    with _cache_lock:
-        _cache_total += 1
-        if cache_hit:
-            _cache_hits += 1
-        ratio = _cache_hits / _cache_total if _cache_total > 0 else 0.0
-        LLM_CACHE_HIT_RATIO.set(ratio)
 
 
 def record_circuit_breaker(api: str, state_value: float) -> None:

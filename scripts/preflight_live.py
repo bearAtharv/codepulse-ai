@@ -138,10 +138,8 @@ def main() -> int:
         gemini_key = cfg.get("GEMINI_API_KEY", "")
         if not gemini_key or gemini_key.strip() in ("", "placeholder", "your_gemini_api_key_here"):
             errors.append("GEMINI_API_KEY is required and must not be empty or placeholder when MOCK_LLM=false.")
-        elif not gemini_key.startswith("AIza"):
-            warnings.append("GEMINI_API_KEY does not start with standard prefix 'AIza'.")
         else:
-            print(f"  [OK] GEMINI_API_KEY is configured (prefix 'AIza...', length={len(gemini_key)}).")
+            print(f"  [OK] GEMINI_API_KEY is configured (length={len(gemini_key)}).")
     else:
         print("  [INFO] MOCK_LLM=true: Gemini API key validation skipped.")
 

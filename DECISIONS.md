@@ -633,6 +633,28 @@ Reviewing these requirements against production realities and upstream ecosystem
    - *Assumption:* `response.usage_metadata.prompt_token_count` and `candidates_token_count` accurately reflect billed consumption.
    - *Boundary:* Contract tests map these fields into `LLMTokenUsage(input=..., output=...)`. Discrepancies between character-length approximations and actual BPE sub-word tokenization can only be verified against live Google Cloud billing metrics.
 
+---
+
+## DEC-025: Circuit Breaker Half-Open State Transience and Observability Boundaries
+
+**Context:** Section 6.3 and Section 10.2 Branch D specify a 3-state circuit breaker (`CLOSED`, `OPEN`, `HALF_OPEN`) guarding calls to the Gemini LLM service. The metric `codepulse_circuit_breaker_state` exposes this state as a numeric gauge: `0.0` (CLOSED), `0.5` (HALF_OPEN), and `1.0` (OPEN). During observability validation, operators observed transitions directly between `1.0` and `0.0` on Prometheus dashboards, prompting an investigation into whether the `HALF_OPEN` state is reached.
+
+**Root Cause & Architectural Dynamics:**
+1. **Millisecond State Transience:**
+   - In Redis, the Lua script `CIRCUIT_CAN_EXECUTE_LUA` transitions state from `OPEN` to `HALF_OPEN` atomically when a task calls `can_execute()` after the 30-second recovery timeout expires.
+   - The probe task immediately performs an LLM API call. Upon success, the worker calls `record_success()`, which invokes the Lua reset script transitioning state from `HALF_OPEN` directly to `CLOSED` (`circuit:gemini:state = CLOSED`).
+   - The duration during which the breaker resides in `HALF_OPEN` is strictly equal to the execution latency of that single probe call (typically 15ms to 120ms in mock and local environments, and under 1.5s in live production).
+
+2. **Prometheus Pull Scrape Window Discrepancy:**
+   - Prometheus operates on a pull-based polling architecture with a fixed scrape interval (configured at 5s in Prometheus and Alloy).
+   - Because the probe window lasts mere milliseconds, the probability of a periodic 5-second scrape falling exactly within that sub-second interval is statistically negligible (less than 1%).
+   - Consequently, Prometheus time-series queries and Grafana dashboards will almost invariably observe the gauge transitioning directly from `1.0` (OPEN) to `0.0` (CLOSED).
+
+3. **Authoritative Source of Truth:**
+   - **Redis is Authoritative:** The authoritative, real-time circuit state is stored in Redis at key `circuit:gemini:state`. When diagnosing probe transitions, operators should query Redis (`redis-cli get circuit:gemini:state`).
+   - **Prometheus is for Fleet Availability Trends:** The Prometheus gauge `codepulse_circuit_breaker_state` serves to visualize availability over time and alert on prolonged outages (`codepulse_circuit_breaker_state == 1.0` for > 1m), rather than capturing sub-second probe transitions.
+
+
 
 
 

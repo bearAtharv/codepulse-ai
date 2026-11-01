@@ -70,6 +70,7 @@ def main() -> int:
         ("BEGIN PRIVATE KEY", "BEGIN PRIVATE KEY"),
         ("ghs_", "ghs_"),
         ("AIza", "AIza"),
+        ("AQ.", "AQ."),
     ]
 
     compose_failures = 0

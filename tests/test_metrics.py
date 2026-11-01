@@ -29,7 +29,7 @@ from codepulse.metrics.registry import (
     FINDINGS_TOTAL,
     GITHUB_API_CALLS_TOTAL,
     GITHUB_API_RATE_LIMIT_REMAINING,
-    LLM_CACHE_HIT_RATIO,
+    LLM_CACHE_REQUESTS_TOTAL,
     LLM_COST_CENTS_TOTAL,
     LLM_LATENCY_SECONDS,
     LLM_TOKENS_CONSUMED,
@@ -109,7 +109,7 @@ class TestMetricsRegistry:
         record_llm_telemetry("gemini-3.7-flash", input_tokens=1000, output_tokens=200, latency_ms=450, cache_hit=True)
         new_tokens = LLM_TOKENS_CONSUMED.labels(model="gemini-3.7-flash", direction="input")._value.get()
         assert new_tokens == init_tokens + 1000
-        assert LLM_CACHE_HIT_RATIO._value.get() >= 0.0
+        assert LLM_CACHE_REQUESTS_TOTAL.labels(status="hit")._value.get() >= 1.0
 
     def test_record_analysis_phase_duration_records(self) -> None:
         """Recording phase duration observes duration in histogram."""

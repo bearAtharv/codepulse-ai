@@ -71,7 +71,7 @@ celery_app.conf.update(
         },
         "scan-unposted-reviews": {
             "task": "tasks.scan_unposted_reviews",
-            "schedule": 600.0,  # every 10 minutes (§6.4)
+            "schedule": float(os.environ.get("BEAT_UNPOSTED_REVIEWS_INTERVAL", "600.0")),  # default 10 min (§6.4), configurable for demo
             "options": {"queue": "cp-high"},
         },
         "drain-pending-persistence": {

@@ -49,6 +49,8 @@ def test_startup_refuses_empty_gemini_api_key_in_live_llm():
     """Startup must be rejected if MOCK_LLM=false and GEMINI_API_KEY is empty or placeholder."""
     for bad_key in ("", "   ", "placeholder", "your_gemini_api_key_here"):
         settings = Settings(
+            mock_github=True,
+            environment="development",
             mock_llm=False,
             gemini_api_key=bad_key,
         )

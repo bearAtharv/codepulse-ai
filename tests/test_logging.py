@@ -176,11 +176,16 @@ class TestSensitiveDataRedaction:
     """Verification that tokens, secrets, passwords, and diffs are redacted (§9.4)."""
 
     def test_redacts_gemini_api_key(self) -> None:
-        """Gemini AIza API keys must be replaced with [REDACTED_GEMINI_KEY]."""
+        """Gemini AIza and AQ. API keys must be replaced with [REDACTED_GEMINI_KEY]."""
         raw = "Calling Gemini API with key AIzaSyD9exampleKey1234567890abcdef_12"
         sanitized = sanitize_text(raw)
         assert "AIzaSyD9exampleKey" not in sanitized
         assert "[REDACTED_GEMINI_KEY]" in sanitized
+
+        raw_aq = "Calling Gemini API with key AQ.AbCdEfGhIjKlMnOpQrStUvWxYz_1234567890"
+        sanitized_aq = sanitize_text(raw_aq)
+        assert "AQ.AbCdEf" not in sanitized_aq
+        assert "[REDACTED_GEMINI_KEY]" in sanitized_aq
 
     def test_redacts_github_tokens(self) -> None:
         """GitHub personal access tokens and installation tokens must be replaced with redaction markers."""
