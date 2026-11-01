@@ -1,0 +1,112 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "codepulse.fullname" . }}-ingestion-netpol
+  labels:
+    {{- include "codepulse.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ingestion
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "codepulse.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: ingestion
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow HTTP webhook traffic from Ingress controller
+    - from:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: {{ .Values.ingestion.port }}
+    # Allow Prometheus metrics scrape
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: {{ .Values.ingestion.metricsPort }}
+  egress:
+    # Allow DNS resolution
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Allow communication to Redis and PostgreSQL
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.config.redisPort }}
+        - protocol: TCP
+          port: {{ .Values.config.databasePort }}
+    # Allow OpenTelemetry traces to Tempo
+    - ports:
+        - protocol: TCP
+          port: 4318
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "codepulse.fullname" . }}-workers-netpol
+  labels:
+    {{- include "codepulse.labels" . | nindent 4 }}
+    app.kubernetes.io/component: workers
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values:
+          - worker-high
+          - worker-analysis
+          - worker-aggregate
+          - worker-retry
+          - worker-dlq
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow Prometheus scrape on worker metrics port
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: {{ .Values.workers.metricsPort }}
+  egress:
+    # Allow DNS resolution
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Allow communication to Redis and PostgreSQL
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.config.redisPort }}
+        - protocol: TCP
+          port: {{ .Values.config.databasePort }}
+    # Allow outbound HTTPS to GitHub API & Gemini API (§8.2)
+    - ports:
+        - protocol: TCP
+          port: 4318 # Tempo traces
+        - protocol: TCP
+          port: 443  # GitHub API & Gemini API
+{{- end }}

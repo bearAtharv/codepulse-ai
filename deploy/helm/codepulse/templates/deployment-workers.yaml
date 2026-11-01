@@ -1,0 +1,158 @@
+{{- $root := . -}}
+{{- range $name, $worker := .Values.workers -}}
+{{- if and (ne $name "metricsPort") (kindIs "map" $worker) }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "codepulse.fullname" $root }}-worker-{{ $name }}
+  labels:
+    {{- include "codepulse.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: worker-{{ $name }}
+spec:
+  {{- if not $root.Values.keda.enabled }}
+  replicas: {{ $worker.minReplicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "codepulse.selectorLabels" $root | nindent 6 }}
+      app.kubernetes.io/component: worker-{{ $name }}
+  template:
+    metadata:
+      labels:
+        {{- include "codepulse.selectorLabels" $root | nindent 8 }}
+        app.kubernetes.io/component: worker-{{ $name }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ $root.Values.workers.metricsPort | quote }}
+        prometheus.io/path: "/metrics"
+    spec:
+      {{- with $root.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: worker
+          image: "{{ $root.Values.image.repository }}:{{ $root.Values.image.tag | default $root.Chart.AppVersion }}"
+          imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+          command:
+            - "celery"
+            - "-A"
+            - "codepulse.worker.celery_app"
+            - "worker"
+            - "-l"
+            - "info"
+            - "-Q"
+            - {{ $worker.queue | quote }}
+            - "-c"
+            - {{ $worker.concurrency | quote }}
+          ports:
+            - name: metrics
+              containerPort: {{ $root.Values.workers.metricsPort }}
+              protocol: TCP
+          env:
+            - name: SERVICE_NAME
+              value: "codepulse-worker"
+            - name: WORKER_QUEUE
+              value: {{ $worker.queue | quote }}
+            - name: WORKER_METRICS_PORT
+              value: {{ $root.Values.workers.metricsPort | quote }}
+            - name: PROMETHEUS_MULTIPROC_DIR
+              value: "/tmp/prometheus_multiproc"
+            - name: ENVIRONMENT
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "codepulse.fullname" $root }}-config
+                  key: ENVIRONMENT
+            - name: DATABASE_URL
+              value: "postgresql://$(DATABASE_USER):$(DATABASE_PASSWORD)@$(DATABASE_HOST):$(DATABASE_PORT)/$(DATABASE_NAME)"
+            - name: DATABASE_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "codepulse.fullname" $root }}-config
+                  key: DATABASE_HOST
+            - name: DATABASE_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "codepulse.fullname" $root }}-config
+                  key: DATABASE_PORT
+            - name: DATABASE_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "codepulse.fullname" $root }}-config
+                  key: DATABASE_NAME
+            - name: DATABASE_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "codepulse.fullname" $root }}-config
+                  key: DATABASE_USER
+            - name: DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "codepulse.fullname" $root }}-secrets
+                  key: DATABASE_PASSWORD
+            - name: REDIS_URL
+              value: "redis://:$(REDIS_PASSWORD)@$(REDIS_HOST):$(REDIS_PORT)/$(REDIS_DB)"
+            - name: CELERY_BROKER_URL
+              value: "redis://:$(REDIS_PASSWORD)@$(REDIS_HOST):$(REDIS_PORT)/$(REDIS_DB)"
+            - name: CELERY_RESULT_BACKEND
+              value: "redis://:$(REDIS_PASSWORD)@$(REDIS_HOST):$(REDIS_PORT)/$(REDIS_DB)"
+            - name: REDIS_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "codepulse.fullname" $root }}-config
+                  key: REDIS_HOST
+            - name: REDIS_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "codepulse.fullname" $root }}-config
+                  key: REDIS_PORT
+            - name: REDIS_DB
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "codepulse.fullname" $root }}-config
+                  key: REDIS_DB
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "codepulse.fullname" $root }}-secrets
+                  key: REDIS_PASSWORD
+            - name: GITHUB_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "codepulse.fullname" $root }}-secrets
+                  key: GITHUB_WEBHOOK_SECRET
+            - name: ADMIN_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "codepulse.fullname" $root }}-secrets
+                  key: ADMIN_API_KEY
+            - name: GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "codepulse.fullname" $root }}-secrets
+                  key: GEMINI_API_KEY
+            - name: GITHUB_APP_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "codepulse.fullname" $root }}-config
+                  key: GITHUB_APP_ID
+            - name: GITHUB_APP_PRIVATE_KEY_PATH
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "codepulse.fullname" $root }}-config
+                  key: GITHUB_APP_PRIVATE_KEY_PATH
+            - name: OTEL_TRACING_ENABLED
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "codepulse.fullname" $root }}-config
+                  key: OTEL_TRACING_ENABLED
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "codepulse.fullname" $root }}-config
+                  key: OTEL_EXPORTER_OTLP_ENDPOINT
+          resources:
+            {{- toYaml $worker.resources | nindent 12 }}
+{{- end }}
+{{- end }}

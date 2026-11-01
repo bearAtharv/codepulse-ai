@@ -1,0 +1,70 @@
+# Production overrides for codepulse Helm chart
+# Usage: helm template codepulse deploy/helm/codepulse -f deploy/helm/codepulse/values-prod.yaml
+
+global:
+  environment: "production"
+
+image:
+  repository: ghcr.io/bearatharv/codepulse
+  tag: "1.0.0"
+  pullPolicy: IfNotPresent
+
+config:
+  databaseHost: "pgbouncer.codepulse.svc.cluster.local"
+  databasePort: 6432
+  redisHost: "redis-master.codepulse.svc.cluster.local"
+  tracingEnabled: "true"
+  tempoEndpoint: "http://tempo-distributor.tempo.svc.cluster.local:4318"
+
+ingestion:
+  replicaCount: 3
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 15
+    targetCPUUtilizationPercentage: 60
+
+workers:
+  high:
+    minReplicas: 3
+    maxReplicas: 15
+  analysis:
+    minReplicas: 5
+    maxReplicas: 40
+  aggregate:
+    minReplicas: 2
+    maxReplicas: 15
+  retry:
+    minReplicas: 2
+    maxReplicas: 8
+  dlq:
+    minReplicas: 1
+    maxReplicas: 3
+
+beat:
+  replicaCount: 1
+
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+  hosts:
+    - host: "codepulse.corp.internal"
+      paths:
+        - path: /webhooks
+          pathType: Prefix
+        - path: /health
+          pathType: Prefix
+  tls:
+    - secretName: "codepulse-prod-tls"
+      hosts:
+        - "codepulse.corp.internal"
+
+networkPolicy:
+  enabled: true
+
+secrets:
+  create: false # In production, secrets are managed via ExternalSecret / Vault

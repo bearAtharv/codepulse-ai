@@ -1,0 +1,46 @@
+{{- if .Values.keda.enabled }}
+{{- $root := . -}}
+{{- range $name, $worker := .Values.workers -}}
+{{- if and (ne $name "metricsPort") (kindIs "map" $worker) }}
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "codepulse.fullname" $root }}-worker-{{ $name }}-scaler
+  labels:
+    {{- include "codepulse.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: worker-{{ $name }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "codepulse.fullname" $root }}-worker-{{ $name }}
+  pollingInterval: {{ $root.Values.keda.pollingInterval }} # §4.4: 10s
+  cooldownPeriod: {{ $root.Values.keda.cooldownPeriod }} # §4.4: 300s stabilization window
+  minReplicaCount: {{ $worker.minReplicas }} # §4.4
+  maxReplicaCount: {{ $worker.maxReplicas }}
+  advanced:
+    restoreToOriginalReplicaCount: true
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: {{ $root.Values.keda.cooldownPeriod }}
+          policies:
+            - type: Percent
+              value: 20
+              periodSeconds: 60
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          policies:
+            - type: Pods
+              value: 2
+              periodSeconds: 15
+  triggers:
+    - type: redis
+      metadata:
+        addressFromEnv: REDIS_URL
+        listName: {{ $worker.queue | quote }}
+        listLength: {{ $worker.targetQueueLength | quote }}
+{{- end }}
+{{- end }}
+{{- end }}

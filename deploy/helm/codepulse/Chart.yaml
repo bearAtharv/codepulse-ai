@@ -1,0 +1,15 @@
+apiVersion: v2
+name: codepulse
+description: Production-grade Helm chart for CodePulse AI — Automated Code Review & Security Analysis Engine
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - security
+  - code-review
+  - ast
+  - gemini
+  - celery
+  - opentelemetry
+maintainers:
+  - name: CodePulse Platform Engineering

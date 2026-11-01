@@ -182,6 +182,7 @@ flowchart TD
 | **Observability (Metrics & Dashboards)** | ✅ | ✅ | N/A | Prometheus v3 scraping isolated internal ports (9090, 9091) + 4 provisioned Grafana dashboards. |
 | **Observability (Logs & Redaction)** | ✅ | ✅ | N/A | Structured JSON logs shipped to Loki v3 via Alloy; automated secret & diff redactor in pipeline. |
 | **Observability (Distributed Tracing)** | ✅ | ✅ | N/A | OpenTelemetry SDK instrumentation with W3C Trace Context across web and Celery workers, Tempo v3 backend, and Grafana trace-to-logs integration. |
+| **Kubernetes Deployment (Helm)** | ✅ | ✅ (Lint & Schema) | 🔲 | Production Helm v3 chart in `deploy/helm/codepulse` with KEDA autoscaling, Ingress security, NetworkPolicies, and migration hook. Lint- and schema-checked only; never deployed to a live cluster. |
 | **Redis Architecture** | ✅ | ✅ | N/A | **Spec Deviation (DEC-016):** Single-primary Redis replaces Redis Cluster because Celery does not support Cluster. |
 
 ---
@@ -255,6 +256,40 @@ Or on the host with Python 3.12+:
 ```bash
 PYTHONPATH=src pytest
 ```
+
+---
+
+## Kubernetes Deployment (Helm Chart)
+
+The production-grade Helm v3 chart is located at `deploy/helm/codepulse`.
+
+> [!NOTE]
+> **Validation Notice:** This chart is lint- and schema-checked only (`helm lint` and `kubeconform`). It has not been deployed to a live Kubernetes cluster.
+
+### Features
+- **Deployments:** Separated deployments for `ingestion` (FastAPI), queue-dedicated Celery workers (`worker-high`, `worker-analysis`, `worker-aggregate`, `worker-retry`, `worker-dlq`), `beat` (1 replica with `strategy.type: Recreate`), and `admin` API.
+- **Resource Limits & Requests:** Configured strictly per §8.2 (`ingestion` 250m/256Mi, `analysis` 500m/512Mi, etc.). Unspecified pool limits are documented judgment calls.
+- **Autoscaling:** KEDA `ScaledObject` templates with Redis list-length triggers matching §4.4 (`cp-high` > 50, `cp-analysis` > 100, `cp-aggregate` > 30), 10s polling, and 300s scale-down stabilization window. Ingestion autoscales via HPA on 60% CPU.
+- **Ingress Security:** Ingress exposes strictly `/webhooks` and `/health` paths. Internal management (`/admin`) and Prometheus endpoints (`/metrics`) are never exposed externally.
+- **NetworkPolicies:** Tight ingress and egress rules isolating ingestion and worker pods, restricting egress to Redis, PostgreSQL, Tempo (4318), and HTTPS (443) for GitHub and Gemini APIs.
+- **Migration Hook:** Pre-install and pre-upgrade Helm Hook Job executing `alembic upgrade head`.
+- **Secrets:** Clean templates with placeholder values and optional Bitnami `SealedSecret` support.
+
+### Validation Commands
+```bash
+# 1. Lint the chart
+helm lint deploy/helm/codepulse
+
+# 2. Render templates with default and production values
+helm template codepulse deploy/helm/codepulse > /tmp/rendered.yaml
+helm template codepulse deploy/helm/codepulse -f deploy/helm/codepulse/values-prod.yaml > /tmp/rendered-prod.yaml
+
+# 3. Schema validation with kubeconform
+kubeconform -summary -schema-location default \
+  -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+  /tmp/rendered.yaml
+```
+
 
 ---
 

@@ -1,0 +1,165 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "codepulse.fullname" . }}-ingestion
+  labels:
+    {{- include "codepulse.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ingestion
+spec:
+  {{- if not .Values.ingestion.autoscaling.enabled }}
+  replicas: {{ .Values.ingestion.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "codepulse.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: ingestion
+  template:
+    metadata:
+      labels:
+        {{- include "codepulse.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: ingestion
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.ingestion.metricsPort | quote }}
+        prometheus.io/path: "/metrics"
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: ingestion
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["uvicorn", "codepulse.ingestion.app:app", "--host", "0.0.0.0", "--port", "{{ .Values.ingestion.port }}"]
+          ports:
+            - name: http
+              containerPort: {{ .Values.ingestion.port }}
+              protocol: TCP
+            - name: metrics
+              containerPort: {{ .Values.ingestion.metricsPort }}
+              protocol: TCP
+          env:
+            - name: SERVICE_NAME
+              value: "codepulse-web"
+            - name: ENVIRONMENT
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "codepulse.fullname" . }}-config
+                  key: ENVIRONMENT
+            - name: DATABASE_URL
+              value: "postgresql://$(DATABASE_USER):$(DATABASE_PASSWORD)@$(DATABASE_HOST):$(DATABASE_PORT)/$(DATABASE_NAME)"
+            - name: DATABASE_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "codepulse.fullname" . }}-config
+                  key: DATABASE_HOST
+            - name: DATABASE_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "codepulse.fullname" . }}-config
+                  key: DATABASE_PORT
+            - name: DATABASE_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "codepulse.fullname" . }}-config
+                  key: DATABASE_NAME
+            - name: DATABASE_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "codepulse.fullname" . }}-config
+                  key: DATABASE_USER
+            - name: DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "codepulse.fullname" . }}-secrets
+                  key: DATABASE_PASSWORD
+            - name: REDIS_URL
+              value: "redis://:$(REDIS_PASSWORD)@$(REDIS_HOST):$(REDIS_PORT)/$(REDIS_DB)"
+            - name: CELERY_BROKER_URL
+              value: "redis://:$(REDIS_PASSWORD)@$(REDIS_HOST):$(REDIS_PORT)/$(REDIS_DB)"
+            - name: CELERY_RESULT_BACKEND
+              value: "redis://:$(REDIS_PASSWORD)@$(REDIS_HOST):$(REDIS_PORT)/$(REDIS_DB)"
+            - name: REDIS_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "codepulse.fullname" . }}-config
+                  key: REDIS_HOST
+            - name: REDIS_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "codepulse.fullname" . }}-config
+                  key: REDIS_PORT
+            - name: REDIS_DB
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "codepulse.fullname" . }}-config
+                  key: REDIS_DB
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "codepulse.fullname" . }}-secrets
+                  key: REDIS_PASSWORD
+            - name: GITHUB_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "codepulse.fullname" . }}-secrets
+                  key: GITHUB_WEBHOOK_SECRET
+            - name: ADMIN_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "codepulse.fullname" . }}-secrets
+                  key: ADMIN_API_KEY
+            - name: GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "codepulse.fullname" . }}-secrets
+                  key: GEMINI_API_KEY
+            - name: OTEL_TRACING_ENABLED
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "codepulse.fullname" . }}-config
+                  key: OTEL_TRACING_ENABLED
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "codepulse.fullname" . }}-config
+                  key: OTEL_EXPORTER_OTLP_ENDPOINT
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.ingestion.resources | nindent 12 }}
+{{- if .Values.ingestion.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "codepulse.fullname" . }}-ingestion-hpa
+  labels:
+    {{- include "codepulse.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ingestion
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "codepulse.fullname" . }}-ingestion
+  minReplicas: {{ .Values.ingestion.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.ingestion.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.ingestion.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}

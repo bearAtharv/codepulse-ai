@@ -1,0 +1,197 @@
+# Default values for codepulse.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+global:
+  environment: "production"
+  imagePullSecrets: []
+
+image:
+  repository: ghcr.io/bearatharv/codepulse
+  pullPolicy: IfNotPresent
+  tag: "1.0.0"
+
+# Application runtime configuration
+config:
+  # Database configuration (PostgreSQL primary / PgBouncer pooler §4.3)
+  databaseHost: "postgres-primary.codepulse.svc.cluster.local"
+  databasePort: 5432
+  databaseName: "codepulse"
+  databaseUser: "codepulse"
+  # Redis configuration (Single-primary Redis per DEC-016; Celery does not support Redis Cluster)
+  redisHost: "redis-master.codepulse.svc.cluster.local"
+  redisPort: 6379
+  redisDb: 0
+  # GitHub App parameters
+  githubAppId: "0"
+  githubAppPrivateKeyPath: "/secrets/github-app-key.pem"
+  # OpenTelemetry distributed tracing (§9.3, DEC-018)
+  tracingEnabled: "true"
+  tempoEndpoint: "http://tempo-distributor.tempo.svc.cluster.local:4318"
+
+# Ingestion service (FastAPI webhook receiver, §3.1, §8.2)
+ingestion:
+  replicaCount: 3 # §8.2, §4.4
+  port: 8000
+  metricsPort: 9090
+  resources: # §8.2 exact values
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  autoscaling: # §4.4 HorizontalPodAutoscaler
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 60
+
+# Celery worker deployments by queue (§3.5, §8.2)
+workers:
+  metricsPort: 9091
+  high:
+    queue: "cp-high"
+    concurrency: 4
+    minReplicas: 3 # §4.4
+    maxReplicas: 10
+    targetQueueLength: 50 # §4.4 KEDA trigger
+    resources: # §8.2
+      requests:
+        cpu: 250m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+  analysis:
+    queue: "cp-analysis"
+    concurrency: 4
+    minReplicas: 5 # §4.4
+    maxReplicas: 30
+    targetQueueLength: 100 # §4.4 KEDA trigger
+    resources: # §8.2
+      requests:
+        cpu: 500m
+        memory: 512Mi
+      limits:
+        cpu: 1000m
+        memory: 1Gi
+  aggregate:
+    queue: "cp-aggregate"
+    concurrency: 4
+    minReplicas: 2 # §4.4
+    maxReplicas: 10
+    targetQueueLength: 30 # §4.4 KEDA trigger
+    resources: # §8.2
+      requests:
+        cpu: 250m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+  retry:
+    queue: "cp-retry"
+    concurrency: 2
+    minReplicas: 2 # Judgment call: dedicated worker pool for rate-limited & exponential retry backoffs
+    maxReplicas: 5
+    targetQueueLength: 20
+    resources: # Judgment call: matches cp-high footprint
+      requests:
+        cpu: 250m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+  dlq:
+    queue: "cp-dlq"
+    concurrency: 1
+    minReplicas: 1 # Judgment call: minimal standby for dead-letter processing & inspection
+    maxReplicas: 2
+    targetQueueLength: 10
+    resources: # Judgment call: matches cp-high footprint
+      requests:
+        cpu: 250m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+# Celery Beat scheduler (§3.5.5, §8.2)
+beat:
+  replicaCount: 1 # Exactly 1 replica per §3.5.5; multiple beats create duplicate scheduled runs
+  strategy:
+    type: Recreate # Guarantee single instance across rolling upgrades
+  resources: # §8.2
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+# Admin API service (Internal operations only, §3.8, §8.2)
+admin:
+  replicaCount: 2 # Judgment call: 2 replicas for high-availability internal operations
+  port: 8000
+  resources: # §8.2
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# Database migration Job hook (Alembic upgrade head)
+migration:
+  enabled: true
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+
+# KEDA Autoscaling Configuration (§4.4)
+keda:
+  enabled: true
+  pollingInterval: 10 # §4.4: Poll Redis every 10 seconds
+  cooldownPeriod: 300 # §4.4: 5-minute stabilization window to prevent thrashing
+
+# Ingress configuration: EXPOSES ONLY /webhooks AND /health (§8.2)
+# Internal endpoints (/metrics, /admin) are strictly disallowed on the Ingress!
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+  hosts:
+    - host: "codepulse.example.com"
+      paths:
+        - path: /webhooks
+          pathType: Prefix
+        - path: /health
+          pathType: Prefix
+  tls:
+    - secretName: "codepulse-tls"
+      hosts:
+        - "codepulse.example.com"
+
+# Network Policies (§8.2)
+networkPolicy:
+  enabled: true
+
+# Secret management: templates and placeholders
+secrets:
+  create: true # Set false if managing secrets out-of-band via ExternalSecrets or Vault
+  databasePassword: "CHANGE_ME_DATABASE_PASSWORD"
+  redisPassword: "CHANGE_ME_REDIS_PASSWORD"
+  githubWebhookSecret: "CHANGE_ME_WEBHOOK_SECRET"
+  adminApiKey: "CHANGE_ME_ADMIN_KEY"
+  geminiApiKey: "CHANGE_ME_GEMINI_KEY"
+  githubAppPrivateKey: "CHANGE_ME_GITHUB_APP_PRIVATE_KEY_PEM"
+  # SealedSecret integration example (Bitnami Sealed Secrets)
+  sealedSecret:
+    enabled: false
