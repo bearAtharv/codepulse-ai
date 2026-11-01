@@ -17,6 +17,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 from codepulse.config import Settings, get_settings
+from codepulse.observability import format_traceparent, get_span_id, get_trace_id, trace_span
 
 logger = logging.getLogger(__name__)
 
@@ -122,35 +123,36 @@ class MockGitHubPoster(BaseGitHubPoster):
 
         data = validated_model.model_dump(exclude_none=True)
 
-        record = {
-            "owner": owner,
-            "repo": repo,
-            "pull_number": pull_number,
-            "payload": data,
-        }
-        self.posted_reviews.append(record)
+        with trace_span("github.post_review", attributes={"repository": f"{owner}/{repo}", "pr_number": pull_number, "action": "post_review"}):
+            record = {
+                "owner": owner,
+                "repo": repo,
+                "pull_number": pull_number,
+                "payload": data,
+            }
+            self.posted_reviews.append(record)
 
-        review_id = 123456789 + len(self.posted_reviews)
-        logger.info(
-            "[MOCK GITHUB] Posted review #%d on %s/%s#%d with %d comments (event=%s)",
-            review_id,
-            owner,
-            repo,
-            pull_number,
-            len(data.get("comments", [])),
-            data.get("event"),
-        )
+            review_id = 123456789 + len(self.posted_reviews)
+            logger.info(
+                "[MOCK GITHUB] Posted review #%d on %s/%s#%d with %d comments (event=%s)",
+                review_id,
+                owner,
+                repo,
+                pull_number,
+                len(data.get("comments", [])),
+                data.get("event"),
+            )
 
-        return {
-            "id": review_id,
-            "node_id": f"MDE3OlB1bGxSZXF1ZXN0UmV2aWV3{review_id}",
-            "html_url": f"https://github.com/{owner}/{repo}/pull/{pull_number}#pullrequestreview-{review_id}",
-            "user": {"login": "codepulse-ai[bot]", "id": 98765432},
-            "body": data.get("body", ""),
-            "state": data.get("event", "COMMENT"),
-            "commit_id": data.get("commit_id", "mock_head_sha"),
-            "submitted_at": "2026-10-08T16:00:00Z",
-        }
+            return {
+                "id": review_id,
+                "node_id": f"MDE3OlB1bGxSZXF1ZXN0UmV2aWV3{review_id}",
+                "html_url": f"https://github.com/{owner}/{repo}/pull/{pull_number}#pullrequestreview-{review_id}",
+                "user": {"login": "codepulse-ai[bot]", "id": 98765432},
+                "body": data.get("body", ""),
+                "state": data.get("event", "COMMENT"),
+                "commit_id": data.get("commit_id", "mock_head_sha"),
+                "submitted_at": "2026-10-08T16:00:00Z",
+            }
 
     @property
     def last_payload(self) -> dict[str, Any] | None:
@@ -208,6 +210,10 @@ class GitHubPoster(BaseGitHubPoster):
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
         }
+        t_id = get_trace_id()
+        s_id = get_span_id()
+        if t_id and s_id:
+            headers["traceparent"] = format_traceparent(t_id, s_id)
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
 
@@ -217,29 +223,30 @@ class GitHubPoster(BaseGitHubPoster):
             len(data.get("comments", [])),
         )
 
-        with self._get_client() as client:
-            response = client.post(url, json=data, headers=headers)
-            if response.status_code == 422 and data.get("comments"):
-                logger.warning(
-                    "GitHub Review API returned 422 Unprocessable Entity for %s#%d. "
-                    "Logging payload and attempting Branch F fallback (summary only, no inline comments). Response: %s",
-                    f"{owner}/{repo}",
-                    pull_number,
-                    response.text,
-                )
-                summary_only_data = {
-                    "event": data.get("event", "COMMENT"),
-                    "body": data.get("body", ""),
-                    "comments": [],
-                }
-                if "commit_id" in data:
-                    summary_only_data["commit_id"] = data["commit_id"]
-                fallback_resp = client.post(url, json=summary_only_data, headers=headers)
-                fallback_resp.raise_for_status()
-                return fallback_resp.json()
+        with trace_span("github.post_review", attributes={"repository": f"{owner}/{repo}", "pr_number": pull_number, "action": "post_review"}):
+            with self._get_client() as client:
+                response = client.post(url, json=data, headers=headers)
+                if response.status_code == 422 and data.get("comments"):
+                    logger.warning(
+                        "GitHub Review API returned 422 Unprocessable Entity for %s#%d. "
+                        "Logging payload and attempting Branch F fallback (summary only, no inline comments). Response: %s",
+                        f"{owner}/{repo}",
+                        pull_number,
+                        response.text,
+                    )
+                    summary_only_data = {
+                        "event": data.get("event", "COMMENT"),
+                        "body": data.get("body", ""),
+                        "comments": [],
+                    }
+                    if "commit_id" in data:
+                        summary_only_data["commit_id"] = data["commit_id"]
+                    fallback_resp = client.post(url, json=summary_only_data, headers=headers)
+                    fallback_resp.raise_for_status()
+                    return fallback_resp.json()
 
-            response.raise_for_status()
-            return response.json()
+                response.raise_for_status()
+                return response.json()
 
 
 # ── Factory ────────────────────────────────────────────────────────────

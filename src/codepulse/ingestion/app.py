@@ -11,10 +11,16 @@ from sqlalchemy import text
 
 from codepulse.observability import (
     configure_logging,
+    flush_tracing,
+    format_traceparent,
     generate_span_id,
     generate_trace_id,
+    get_span_id,
+    get_trace_id,
+    init_tracing,
     parse_traceparent,
     trace_scope,
+    trace_span,
 )
 from codepulse.config import get_settings, validate_settings
 from codepulse.metrics.server import start_metrics_server
@@ -31,6 +37,7 @@ async def lifespan(app: FastAPI):
     """Start internal metrics server on isolated port 9090 and validate configuration."""
     import sys
     validate_settings(get_settings())
+    init_tracing(service_name="codepulse-web")
     metrics_port = int(os.environ.get("METRICS_PORT", "9090"))
     metrics_server = None
     if os.environ.get("TEST_ENV", "").lower() not in ("true", "1") and "pytest" not in sys.modules:
@@ -40,6 +47,7 @@ async def lifespan(app: FastAPI):
             import logging
             logging.getLogger(__name__).warning("Could not start internal metrics server: %s", exc)
     yield
+    flush_tracing()
     if metrics_server:
         try:
             metrics_server.shutdown()
@@ -61,13 +69,26 @@ async def trace_id_middleware(request: Request, call_next):
     traceparent = request.headers.get("traceparent")
     parsed_tp = parse_traceparent(traceparent) if traceparent else None
     if parsed_tp:
-        trace_id, _ = parsed_tp
+        trace_id, parent_span_id = parsed_tp
     else:
         trace_id = request.headers.get("X-Trace-Id") or generate_trace_id()
-    span_id = generate_span_id()
-    with trace_scope(trace_id=trace_id, span_id=span_id, service="codepulse-web"):
+        parent_span_id = None
+
+    span_name = "http.webhook_receive" if request.url.path.startswith("/webhooks") else f"http.{request.method.lower()}"
+    with trace_span(
+        span_name,
+        trace_id=trace_id,
+        parent_span_id=parent_span_id,
+        service="codepulse-web",
+        attributes={"http.method": request.method, "http.target": request.url.path},
+    ) as span:
         response = await call_next(request)
-        response.headers["X-Trace-Id"] = trace_id
+        span.set_attribute("http.status_code", response.status_code)
+        active_t = get_trace_id() or trace_id
+        active_s = get_span_id()
+        response.headers["X-Trace-Id"] = active_t
+        if active_s:
+            response.headers["traceparent"] = format_traceparent(active_t, active_s)
         return response
 
 

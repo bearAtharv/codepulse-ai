@@ -83,7 +83,7 @@ celery_app.conf.update(
 )
 
 # ── Metrics server for worker processes (§9.2, DEC-016) ─────────────
-from celery.signals import worker_init, worker_ready
+from celery.signals import worker_init, worker_ready, worker_process_init
 
 
 @worker_init.connect
@@ -107,6 +107,16 @@ def on_worker_ready(**kwargs: Any) -> None:
         start_metrics_server(port=port)
     except Exception as exc:
         logging.getLogger(__name__).warning("Could not start worker metrics server on port %d: %s", port, exc)
+
+
+@worker_process_init.connect
+def on_worker_process_init(**kwargs: Any) -> None:
+    """Initialize OpenTelemetry tracing inside each worker child process."""
+    import os
+    from codepulse.observability import init_tracing
+
+    service_name = os.environ.get("SERVICE_NAME", "codepulse-worker")
+    init_tracing(service_name=service_name)
 
 
 # ── Structured Logging & Trace Context Propagation (§9.3, §9.4, DEC-018) ─────

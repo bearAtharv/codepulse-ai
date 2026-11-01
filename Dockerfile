@@ -14,7 +14,8 @@ WORKDIR /app
 # Copy dependency files first for layer caching
 COPY pyproject.toml poetry.lock ./
 
-RUN poetry install --no-ansi --no-root
+RUN poetry config installer.max-workers 4 && \
+    poetry install --no-ansi --no-root
 
 # Copy source code
 COPY . .

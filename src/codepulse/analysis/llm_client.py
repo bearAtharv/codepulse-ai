@@ -23,6 +23,7 @@ from codepulse.analysis.llm_schemas import (
     LLMTokenUsage,
     Severity,
 )
+from codepulse.observability import trace_span
 
 logger = logging.getLogger(__name__)
 
@@ -85,28 +86,29 @@ class GeminiClient(BaseLLMClient):
 
         use_model = model or self._default_model
 
-        try:
-            response = self._genai_client.models.generate_content(
-                model=use_model,
-                contents=user_message,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_instruction,
-                    response_mime_type="application/json",
-                    response_schema=LLMResponse,
-                    temperature=0.1,  # Low temperature for deterministic analysis
-                    tools=None,       # Explicitly no tools (§3.4.7 defense #5)
-                ),
-            )
-        except errors.APIError as api_err:
-            code = getattr(api_err, "code", None) or getattr(api_err, "status_code", None)
-            is_retryable = code in (429, 500, 502, 503, 504)
-            logger.error(
-                "Gemini API error (code=%s, retryable=%s): %s",
-                code,
-                is_retryable,
-                api_err,
-            )
-            raise
+        with trace_span("gemini.generate_content", attributes={"model": use_model}):
+            try:
+                response = self._genai_client.models.generate_content(
+                    model=use_model,
+                    contents=user_message,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_instruction,
+                        response_mime_type="application/json",
+                        response_schema=LLMResponse,
+                        temperature=0.1,  # Low temperature for deterministic analysis
+                        tools=None,       # Explicitly no tools (§3.4.7 defense #5)
+                    ),
+                )
+            except errors.APIError as api_err:
+                code = getattr(api_err, "code", None) or getattr(api_err, "status_code", None)
+                is_retryable = code in (429, 500, 502, 503, 504)
+                logger.error(
+                    "Gemini API error (code=%s, retryable=%s): %s",
+                    code,
+                    is_retryable,
+                    api_err,
+                )
+                raise
 
         # Check safety blocks
         candidates = getattr(response, "candidates", None) or []
@@ -325,16 +327,17 @@ class MockLLMClient(BaseLLMClient):
         )
         output_tokens = len(output_text) // 4
 
-        return LLMResponse(
-            findings=findings,
-            metadata=LLMResponseMetadata(
-                model_version=f"mock-{model}",
-                token_usage=LLMTokenUsage(
-                    input=input_tokens,
-                    output=output_tokens,
+        with trace_span("gemini.generate_content", attributes={"model": model, "prompt_tokens": input_tokens, "completion_tokens": output_tokens}):
+            return LLMResponse(
+                findings=findings,
+                metadata=LLMResponseMetadata(
+                    model_version=f"mock-{model}",
+                    token_usage=LLMTokenUsage(
+                        input=input_tokens,
+                        output=output_tokens,
+                    ),
                 ),
-            ),
-        )
+            )
 
     def verify_model_availability(self, model: str | None = None) -> bool:
         """Verify model availability in mock client."""

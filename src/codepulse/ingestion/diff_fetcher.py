@@ -25,6 +25,7 @@ from typing import Any
 import httpx
 
 from codepulse.config import Settings, get_settings
+from codepulse.observability import format_traceparent, get_span_id, get_trace_id, trace_span
 
 logger = logging.getLogger(__name__)
 
@@ -209,39 +210,40 @@ class MockDiffFetcher(BaseDiffFetcher):
         pull_number: int,
         installation_id: int | None = None,
     ) -> list[PRFile]:
-        if self._custom_files is not None:
-            return list(self._custom_files)
+        with trace_span("github.fetch_diff", attributes={"repository": f"{owner}/{repo}", "pr_number": pull_number, "action": "fetch_files"}):
+            if self._custom_files is not None:
+                return list(self._custom_files)
 
-        logger.info(
-            "[MOCK GITHUB] Fetching PR files for %s/%s#%d",
-            owner,
-            repo,
-            pull_number,
-        )
-        return [
-            PRFile(
-                filename="src/app.py",
-                status="added",
-                additions=2,
-                deletions=0,
-                changes=2,
-                patch=_MOCK_APP_PY_PATCH,
-                raw_content=_MOCK_APP_PY_CONTENT,
-            ),
-            PRFile(
-                filename="src/index.js",
-                status="modified",
-                additions=1,
-                deletions=1,
-                changes=2,
-                patch=_MOCK_INDEX_JS_PATCH,
-                raw_content=_MOCK_INDEX_JS_CONTENT,
-            ),
-            PRFile(
-                filename="src/clean.py",
-                status="added",
-                additions=2,
-                deletions=0,
+            logger.info(
+                "[MOCK GITHUB] Fetching PR files for %s/%s#%d",
+                owner,
+                repo,
+                pull_number,
+            )
+            return [
+                PRFile(
+                    filename="src/app.py",
+                    status="added",
+                    additions=2,
+                    deletions=0,
+                    changes=2,
+                    patch=_MOCK_APP_PY_PATCH,
+                    raw_content=_MOCK_APP_PY_CONTENT,
+                ),
+                PRFile(
+                    filename="src/index.js",
+                    status="modified",
+                    additions=1,
+                    deletions=1,
+                    changes=2,
+                    patch=_MOCK_INDEX_JS_PATCH,
+                    raw_content=_MOCK_INDEX_JS_CONTENT,
+                ),
+                PRFile(
+                    filename="src/clean.py",
+                    status="added",
+                    additions=2,
+                    deletions=0,
                 changes=2,
                 patch=_MOCK_CLEAN_PY_PATCH,
                 raw_content=_MOCK_CLEAN_PY_CONTENT,
@@ -381,6 +383,10 @@ class GitHubDiffFetcher(BaseDiffFetcher):
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
         }
+        t_id = get_trace_id()
+        s_id = get_span_id()
+        if t_id and s_id:
+            headers["traceparent"] = format_traceparent(t_id, s_id)
         auth_token = self.token
         if not auth_token and installation_id is not None:
             auth_token = self.get_installation_token(installation_id)
@@ -395,42 +401,43 @@ class GitHubDiffFetcher(BaseDiffFetcher):
         pull_number: int,
         installation_id: int | None = None,
     ) -> list[PRFile]:
-        headers = self._build_headers(installation_id)
-        files: list[PRFile] = []
-        page = 1
-        per_page = 100
+        with trace_span("github.fetch_diff", attributes={"repository": f"{owner}/{repo}", "pr_number": pull_number, "action": "fetch_files"}):
+            headers = self._build_headers(installation_id)
+            files: list[PRFile] = []
+            page = 1
+            per_page = 100
 
-        with self._get_client() as client:
-            while True:
-                url = f"{self.base_url}/repos/{owner}/{repo}/pulls/{pull_number}/files"
-                response = client.get(
-                    url,
-                    headers=headers,
-                    params={"per_page": per_page, "page": page},
-                )
-                self._update_rate_limit(response)
-                response.raise_for_status()
-                items = response.json()
-                if not items:
-                    break
-
-                for item in items:
-                    files.append(
-                        PRFile(
-                            filename=item["filename"],
-                            status=item.get("status", "modified"),
-                            additions=item.get("additions", 0),
-                            deletions=item.get("deletions", 0),
-                            changes=item.get("changes", 0),
-                            patch=item.get("patch"),
-                        )
+            with self._get_client() as client:
+                while True:
+                    url = f"{self.base_url}/repos/{owner}/{repo}/pulls/{pull_number}/files"
+                    response = client.get(
+                        url,
+                        headers=headers,
+                        params={"per_page": per_page, "page": page},
                     )
+                    self._update_rate_limit(response)
+                    response.raise_for_status()
+                    items = response.json()
+                    if not items:
+                        break
 
-                if len(items) < per_page:
-                    break
-                page += 1
+                    for item in items:
+                        files.append(
+                            PRFile(
+                                filename=item["filename"],
+                                status=item.get("status", "modified"),
+                                additions=item.get("additions", 0),
+                                deletions=item.get("deletions", 0),
+                                changes=item.get("changes", 0),
+                                patch=item.get("patch"),
+                            )
+                        )
 
-        return files
+                    if len(items) < per_page:
+                        break
+                    page += 1
+
+            return files
 
     def fetch_file_content(
         self,

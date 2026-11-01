@@ -1,0 +1,21 @@
+apiVersion: 1
+
+datasources:
+  - name: Tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    isDefault: false
+    editable: false
+    uid: TEMPO_DEFAULT
+    jsonData:
+      httpMethod: GET
+      tracesToLogsV2:
+        datasourceUid: LOKI_DEFAULT
+        spanStartTimeShift: '1m'
+        spanEndTimeShift: '1m'
+        filterByTraceId: true
+        filterBySpanId: false
+        query: '{service_name=~".+"} |= "$${__trace.id}"'
+      lokiSearch:
+        datasourceUid: LOKI_DEFAULT

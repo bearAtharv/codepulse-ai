@@ -181,6 +181,7 @@ flowchart TD
 | **Dead-Letter Handling & Admin Retry** | ✅ | ✅ | N/A | Durable review payloads stored in `dead_letter_log`; retryable via Beat or `POST /admin/retry-posting`. |
 | **Observability (Metrics & Dashboards)** | ✅ | ✅ | N/A | Prometheus v3 scraping isolated internal ports (9090, 9091) + 4 provisioned Grafana dashboards. |
 | **Observability (Logs & Redaction)** | ✅ | ✅ | N/A | Structured JSON logs shipped to Loki v3 via Alloy; automated secret & diff redactor in pipeline. |
+| **Observability (Distributed Tracing)** | ✅ | ✅ | N/A | OpenTelemetry SDK instrumentation with W3C Trace Context across web and Celery workers, Tempo v3 backend, and Grafana trace-to-logs integration. |
 | **Redis Architecture** | ✅ | ✅ | N/A | **Spec Deviation (DEC-016):** Single-primary Redis replaces Redis Cluster because Celery does not support Cluster. |
 
 ---

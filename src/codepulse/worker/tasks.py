@@ -21,6 +21,7 @@ Defines the distributed DAG:
 from __future__ import annotations
 
 import dataclasses
+import functools
 import hashlib
 import json
 import logging
@@ -81,7 +82,7 @@ from codepulse.metrics import (
     record_pipeline_duration,
 )
 from codepulse.models.tables import AnalysisRun, DeadLetterLog, Finding as DBFinding
-from codepulse.observability import get_span_id, get_trace_id, set_trace_context
+from codepulse.observability import get_span_id, get_trace_id, set_trace_context, trace_span
 from codepulse.persistence.database import (
     get_payload_ref,
     get_redis_client,
@@ -262,6 +263,46 @@ def recover_pending_persistence(redis_client: Any, db: Any) -> int:
     return recovered
 
 
+def extract_task_trace_context(self_or_task: Any, data: Any = None) -> tuple[str | None, str | None]:
+    """Extract trace_id and span_id from Celery request headers or payload dictionary."""
+    t_id = None
+    p_id = None
+    req = getattr(self_or_task, "request", None) if self_or_task else None
+    if req and getattr(req, "headers", None):
+        t_id = req.headers.get("trace_id")
+        p_id = req.headers.get("span_id")
+    if not t_id and isinstance(data, dict):
+        t_id = data.get("trace_id")
+        p_id = p_id or data.get("span_id")
+        if not t_id and isinstance(data.get("context"), dict):
+            t_id = data["context"].get("trace_id")
+            p_id = p_id or data["context"].get("span_id")
+    t_id = t_id or get_trace_id()
+    p_id = p_id or get_span_id()
+    return t_id, p_id
+
+
+def trace_task_execution(span_name: str):
+    """Decorator to wrap Celery tasks in an OpenTelemetry span with correlation."""
+    def decorator(fn: Any) -> Any:
+        @functools.wraps(fn)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            self_or_task = args[0] if args and hasattr(args[0], "request") else None
+            data = None
+            if len(args) > 1:
+                data = args[1]
+            elif args and isinstance(args[0], dict):
+                data = args[0]
+            elif kwargs:
+                data = kwargs
+
+            t_id, p_id = extract_task_trace_context(self_or_task, data)
+            with trace_span(span_name, trace_id=t_id, parent_span_id=p_id):
+                return fn(*args, **kwargs)
+        return wrapper
+    return decorator
+
+
 @celery_app.task(
     name="tasks.orchestrate_pr_analysis",
     queue="cp-high",
@@ -283,53 +324,56 @@ def orchestrate_pr_analysis(
     """Entry point for the PR analysis pipeline (Step 8 of §10.1)."""
     active_trace_id = trace_id or get_trace_id()
     active_span_id = span_id or get_span_id()
-    if active_trace_id:
-        set_trace_context(
-            trace_id=active_trace_id,
-            span_id=active_span_id,
-            repository=repository_full_name,
-            pr_number=pull_request_number,
-            head_sha=head_sha,
-            analysis_run_id=analysis_run_id,
+
+    with trace_span(
+        "celery.orchestrate_pr_analysis",
+        trace_id=active_trace_id,
+        parent_span_id=active_span_id,
+        attributes={
+            "repository": repository_full_name,
+            "pr_number": pull_request_number,
+            "head_sha": head_sha,
+            "analysis_run_id": analysis_run_id,
+        },
+    ):
+        logger.info(
+            "orchestrate_pr_analysis started: %s#%d @ %s (run=%s)",
+            repository_full_name,
+            pull_request_number,
+            head_sha[:8],
+            analysis_run_id,
         )
 
-    logger.info(
-        "orchestrate_pr_analysis started: %s#%d @ %s (run=%s)",
-        repository_full_name,
-        pull_request_number,
-        head_sha[:8],
-        analysis_run_id,
-    )
+        try:
+            factory = get_session_factory()
+            with factory() as db:
+                update_analysis_run_status(db, analysis_run_id, status="running")
+        except Exception as exc:
+            logger.error("Failed to update status to running for %s: %s", analysis_run_id, exc)
 
-    try:
-        factory = get_session_factory()
-        with factory() as db:
-            update_analysis_run_status(db, analysis_run_id, status="running")
-    except Exception as exc:
-        logger.error("Failed to update status to running for %s: %s", analysis_run_id, exc)
+        curr_span_id = get_span_id()
+        payload: dict[str, Any] = {
+            "installation_id": installation_id,
+            "repository_full_name": repository_full_name,
+            "pull_request_number": pull_request_number,
+            "head_sha": head_sha,
+            "base_sha": base_sha,
+            "pr_author": pr_author,
+            "webhook_received_at": webhook_received_at,
+            "analysis_run_id": analysis_run_id,
+            "trace_id": active_trace_id,
+            "span_id": curr_span_id,
+        }
 
-    payload: dict[str, Any] = {
-        "installation_id": installation_id,
-        "repository_full_name": repository_full_name,
-        "pull_request_number": pull_request_number,
-        "head_sha": head_sha,
-        "base_sha": base_sha,
-        "pr_author": pr_author,
-        "webhook_received_at": webhook_received_at,
-        "analysis_run_id": analysis_run_id,
-        "trace_id": active_trace_id,
-        "span_id": active_span_id,
-    }
+        try:
+            workflow = chain(fetch_pr_diff.s(payload), preprocess_and_chunk.s())
+            workflow.apply_async(headers={"trace_id": active_trace_id, "span_id": curr_span_id})
+        except Exception as exc:
+            logger.error("Failed to dispatch workflow chain for %s: %s", analysis_run_id, exc)
+            record_terminal_failure(analysis_run_id, error_message=str(exc))
+            raise
 
-    try:
-        workflow = chain(fetch_pr_diff.s(payload), preprocess_and_chunk.s())
-        workflow.apply_async(headers={"trace_id": active_trace_id, "span_id": active_span_id})
-    except Exception as exc:
-        logger.error("Failed to dispatch workflow chain for %s: %s", analysis_run_id, exc)
-        record_terminal_failure(analysis_run_id, error_message=str(exc))
-        raise
-
-    return {"status": "running", "analysis_run_id": analysis_run_id}
+        return {"status": "running", "analysis_run_id": analysis_run_id}
 
 
 @celery_app.task(
@@ -340,6 +384,7 @@ def orchestrate_pr_analysis(
     soft_time_limit=30,
     time_limit=45,
 )
+@trace_task_execution("celery.fetch_pr_diff")
 def fetch_pr_diff(self: Any, payload: dict[str, Any]) -> dict[str, Any]:
     """Fetch PR files and unified diff patches from GitHub REST API (Step 9 of §10.1)."""
     repo_full_name = payload["repository_full_name"]
@@ -497,6 +542,7 @@ def fetch_pr_diff(self: Any, payload: dict[str, Any]) -> dict[str, Any]:
     soft_time_limit=10,
     time_limit=15,
 )
+@trace_task_execution("celery.preprocess_and_chunk")
 def preprocess_and_chunk(self: Any, data: dict[str, Any]) -> dict[str, Any]:
     """Filter files, chunk diffs, and dispatch parallel analysis chord (Step 10-11 of §10.1)."""
     context = data["context"]
@@ -606,6 +652,7 @@ def preprocess_and_chunk(self: Any, data: dict[str, Any]) -> dict[str, Any]:
     soft_time_limit=5,
     time_limit=8,
 )
+@trace_task_execution("celery.analyze_ast")
 def analyze_ast_task(self: Any, chunk_data: dict[str, Any]) -> dict[str, Any]:
     """Execute tree-sitter AST heuristics on a single chunk (Step 12 of §10.1)."""
     start_ts = time.time()
@@ -663,6 +710,7 @@ def analyze_ast_task(self: Any, chunk_data: dict[str, Any]) -> dict[str, Any]:
     soft_time_limit=15,
     time_limit=20,
 )
+@trace_task_execution("celery.analyze_llm")
 def analyze_llm_task(
     self: Any,
     chunks_data: list[dict[str, Any]],
@@ -913,6 +961,7 @@ def analyze_llm_task(
     soft_time_limit=5,
     time_limit=8,
 )
+@trace_task_execution("celery.aggregate_findings")
 def aggregate_findings(
     self: Any,
     results: list[dict[str, Any]],
@@ -1072,6 +1121,7 @@ def aggregate_findings(
     soft_time_limit=30,
     time_limit=45,
 )
+@trace_task_execution("celery.post_review_to_github")
 def post_review_to_github(self: Any, data: dict[str, Any]) -> dict[str, Any]:
     """Post inline review comments to GitHub Pull Request Review API (Step 15 of §10.1)."""
     ctx = data["context"]
@@ -1263,6 +1313,7 @@ def post_review_to_github(self: Any, data: dict[str, Any]) -> dict[str, Any]:
     soft_time_limit=10,
     time_limit=15,
 )
+@trace_task_execution("celery.persist_results")
 def persist_results(self: Any, data: dict[str, Any]) -> dict[str, Any]:
     """Persist findings, LLM telemetry, and final run statistics to PostgreSQL (Step 16)."""
     ctx = data["context"]
@@ -1783,6 +1834,7 @@ def scan_reanalysis_needed() -> int:
     soft_time_limit=120,
     time_limit=180,
 )
+@trace_task_execution("celery.scan_unposted_reviews")
 def scan_unposted_reviews(cutoff_minutes: int = 15) -> int:
     """Periodic task on Celery Beat (every 10 min per §6.4) to re-enqueue unposted reviews older than 15 minutes.
 
