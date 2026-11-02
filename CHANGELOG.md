@@ -2,6 +2,13 @@
 
 All notable changes to CodePulse AI are documented here.
 
+## [1.0.0-rc2] — 2026-11-02
+
+### Fixed
+- **Host Test Suite Performance**: Added active socket probe `is_collector_available()` to OpenTelemetry setup in `src/codepulse/observability/tracing.py` and guarded `flush_tracing()` so unresolvable collector endpoints (e.g. `http://tempo:4318` on local test host) bypass timeout backoffs, reducing host pytest execution time from 29.4s down to 3.6s.
+- **Prometheus Worker Scrape Job Label**: Updated Prometheus scrape configuration job name in `deploy/prometheus/prometheus.yml` from `codepulse-worker` to `codepulse-workers` to ensure scraped series match Grafana dashboard target queries.
+- **Tracing Security Validation**: Added explicit unit test `test_dynamic_unallowlisted_attributes_are_never_emitted` in `tests/test_tracing.py` asserting that dynamic attributes outside the allowlist are rejected.
+
 ## [1.0.0-rc1] — 2026-11-01
 
 ### Added

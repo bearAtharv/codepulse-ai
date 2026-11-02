@@ -13,6 +13,7 @@ os.environ["MOCK_RATE_LIMIT"] = "false"
 os.environ["MOCK_GITHUB_RATE_LIMIT"] = "false"
 os.environ["MOCK_POSTING_FAILURE"] = "false"
 os.environ["MOCK_QUICK_RETRIES"] = "false"
+os.environ["OTEL_TRACING_ENABLED"] = "false"
 os.environ["GITHUB_WEBHOOK_SECRET"] = "dev_webhook_secret_not_for_production"
 os.environ["ADMIN_API_KEY"] = "dev_admin_key_not_for_production"
 

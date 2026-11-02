@@ -154,3 +154,39 @@ def test_trace_span_context_nesting_and_correlation() -> None:
 
         # Back in task span
         assert get_span_id() == current_s
+
+
+def test_dynamic_unallowlisted_attributes_are_never_emitted() -> None:
+    """Verify that ANY dynamic, arbitrary, or unknown key outside ALLOWED_SPAN_ATTRIBUTES is rejected."""
+    raw_span = MagicMock()
+    wrapper = SafeSpanWrapper(raw_span)
+
+    # Generate 50 dynamic unallowlisted attributes
+    dynamic_forbidden = {
+        f"arbitrary_user_key_{i}": f"secret_value_{i}"
+        for i in range(25)
+    }
+    # Add variations containing substrings of sensitive terms
+    dynamic_forbidden.update({
+        "customer_diff": "diff --git a/test b/test",
+        "raw_source_blob": "SELECT * FROM users WHERE id = '%s'",
+        "bearer_token_val": "ghp_xxxxxxxxxxxxxxxxxxxx",
+        "pr_review_text_hunk": "LGTM with minor comments",
+        "internal_jwt": "eyJhbGciOi...",
+        "sql_query_text": "DROP TABLE analysis_runs;",
+        "git_patch_chunk": "@@ -10,5 +10,6 @@",
+    })
+
+    # Test sanitize_span_attributes drops all 32 dynamic forbidden keys
+    sanitized = sanitize_span_attributes(dynamic_forbidden)
+    assert sanitized == {}, f"Expected empty dict, got {sanitized}"
+
+    # Test SafeSpanWrapper drops all 32 keys
+    wrapper.set_attributes(dynamic_forbidden)
+    assert raw_span.set_attribute.call_count == 0
+
+    # Test individual set_attribute with dynamic keys
+    for k, v in dynamic_forbidden.items():
+        wrapper.set_attribute(k, v)
+    assert raw_span.set_attribute.call_count == 0
+

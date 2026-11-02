@@ -7,8 +7,10 @@ import logging
 import os
 import re
 import secrets
+import socket
 from contextvars import ContextVar
 from typing import Any, Generator
+from urllib.parse import urlparse
 
 from opentelemetry import trace
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
@@ -126,6 +128,23 @@ def is_tracing_enabled() -> bool:
     return os.environ.get("OTEL_TRACING_ENABLED", "true").lower() in ("true", "1", "yes")
 
 
+def is_collector_available(endpoint: str, timeout_seconds: float = 0.1) -> bool:
+    """Check if the OTLP collector endpoint host is resolvable and accepting connections."""
+    try:
+        parsed = urlparse(endpoint)
+        host = parsed.hostname
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        if not host:
+            return False
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout_seconds)
+        result = sock.connect_ex((host, port))
+        sock.close()
+        return result == 0
+    except Exception:
+        return False
+
+
 _tracer_initialized = False
 
 
@@ -144,25 +163,30 @@ def init_tracing(service_name: str | None = None) -> None:
     raw_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "http://tempo:4318")
     endpoint = raw_endpoint if raw_endpoint.endswith("/v1/traces") else f"{raw_endpoint.rstrip('/')}/v1/traces"
 
-    try:
-        exporter = OTLPSpanExporter(endpoint=endpoint, timeout=2)
-        processor = BatchSpanProcessor(
-            exporter,
-            max_queue_size=2048,
-            schedule_delay_millis=200,
-            max_export_batch_size=512,
-            export_timeout_millis=2000,
-        )
-        provider.add_span_processor(processor)
-    except Exception as exc:
-        logger.warning("Could not initialize OTLP span exporter (%s): %s", endpoint, exc)
+    if is_collector_available(endpoint):
+        try:
+            exporter = OTLPSpanExporter(endpoint=endpoint, timeout=2)
+            processor = BatchSpanProcessor(
+                exporter,
+                max_queue_size=2048,
+                schedule_delay_millis=200,
+                max_export_batch_size=512,
+                export_timeout_millis=2000,
+            )
+            provider.add_span_processor(processor)
+        except Exception as exc:
+            logger.warning("Could not initialize OTLP span exporter (%s): %s", endpoint, exc)
+    else:
+        logger.debug("OTLP collector at %s is not reachable; tracing export disabled (in-memory no-op).", endpoint)
 
     trace.set_tracer_provider(provider)
     _tracer_initialized = True
 
 
-def flush_tracing(timeout_millis: int = 2000) -> None:
+def flush_tracing(timeout_millis: int = 1000) -> None:
     """Force-flush pending spans to the exporter."""
+    if not is_tracing_enabled():
+        return
     provider = trace.get_tracer_provider()
     if hasattr(provider, "force_flush"):
         try:
