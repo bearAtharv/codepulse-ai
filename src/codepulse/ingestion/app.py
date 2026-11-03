@@ -25,8 +25,10 @@ from codepulse.observability import (
 from codepulse.config import get_settings, validate_settings
 from codepulse.metrics.server import start_metrics_server
 from codepulse.persistence.database import get_engine, get_redis_client
+from fastapi.staticfiles import StaticFiles
 from codepulse.ingestion.admin import router as admin_router
 from codepulse.ingestion.webhook import router as webhook_router
+from codepulse.ui.router import STATIC_DIR, router as ui_router
 
 # Initialize structured logging (§9.4, DEC-018)
 configure_logging(service_name="codepulse-web")
@@ -94,6 +96,8 @@ async def trace_id_middleware(request: Request, call_next):
 
 app.include_router(webhook_router)
 app.include_router(admin_router)
+app.include_router(ui_router)
+app.mount("/ui/static", StaticFiles(directory=str(STATIC_DIR)), name="ui_static")
 
 
 @app.get("/health/live")

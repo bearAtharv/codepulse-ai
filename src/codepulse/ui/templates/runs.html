@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+
+{% block title %}Recent Runs — CodePulse AI{% endblock %}
+
+{% block content %}
+<div class="card">
+  <div class="card-title">
+    <span>Recent Pull Request Analyses</span>
+    <form method="GET" action="/ui/runs" style="display: flex; gap: 0.5rem; align-items: center;">
+      <label for="status-filter" style="font-size: 0.85rem; color: var(--text-muted); font-weight: normal;">Filter Status:</label>
+      <select id="status-filter" name="status" class="form-select" style="width: auto; padding: 0.25rem 0.5rem; font-size: 0.85rem;" onchange="this.form.submit()">
+        <option value="" {% if not current_status %}selected{% endif %}>All Statuses</option>
+        <option value="completed" {% if current_status == 'completed' %}selected{% endif %}>Completed</option>
+        <option value="pending" {% if current_status == 'pending' %}selected{% endif %}>Pending</option>
+        <option value="failed" {% if current_status == 'failed' %}selected{% endif %}>Failed</option>
+      </select>
+    </form>
+  </div>
+
+  {% if runs|length == 0 %}
+  <div class="alert alert-info" style="margin-top: 1rem;">
+    No analysis runs found matching the filter. Use <a href="/ui/simulate" style="text-decoration: underline; color: inherit;">Simulate PR</a> to trigger a new analysis.
+  </div>
+  {% else %}
+  <div style="overflow-x: auto;">
+    <table class="data-table" id="runs-table">
+      <thead>
+        <tr>
+          <th>Repository</th>
+          <th>PR</th>
+          <th>Status</th>
+          <th>Findings by Severity</th>
+          <th>Duration</th>
+          <th>Received At</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in runs %}
+        <tr>
+          <td>
+            <strong>{{ r.repository_name }}</strong>
+          </td>
+          <td>#{{ r.pull_request_number }}</td>
+          <td>
+            <span class="badge badge-{{ r.status }}">{{ r.status|upper }}</span>
+          </td>
+          <td>
+            <div style="display: flex; gap: 0.35rem; align-items: center;">
+              {% if r.sev_counts.critical > 0 %}
+              <span class="badge badge-critical" title="Critical">{{ r.sev_counts.critical }}C</span>
+              {% endif %}
+              {% if r.sev_counts.high > 0 %}
+              <span class="badge badge-high" title="High">{{ r.sev_counts.high }}H</span>
+              {% endif %}
+              {% if r.sev_counts.medium > 0 %}
+              <span class="badge badge-medium" title="Medium">{{ r.sev_counts.medium }}M</span>
+              {% endif %}
+              {% if r.sev_counts.low > 0 %}
+              <span class="badge badge-low" title="Low">{{ r.sev_counts.low }}L</span>
+              {% endif %}
+              {% if r.total_findings == 0 %}
+              <span style="color: var(--text-muted); font-size: 0.8rem;">0 findings</span>
+              {% endif %}
+            </div>
+          </td>
+          <td style="color: var(--text-muted); font-size: 0.85rem;">{{ r.duration_formatted }}</td>
+          <td style="color: var(--text-muted); font-size: 0.85rem;">{{ r.received_at_formatted }}</td>
+          <td>
+            <a href="/ui/runs/{{ r.id }}" class="btn btn-secondary btn-sm" id="view-run-{{ r.id }}">Details &rarr;</a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 1.25rem; font-size: 0.85rem; color: var(--text-muted);">
+    <div>
+      Showing Page <strong>{{ page }}</strong> of <strong>{{ total_pages }}</strong> ({{ total_count }} total runs)
+    </div>
+    <div style="display: flex; gap: 0.5rem;">
+      {% if page > 1 %}
+      <a href="/ui/runs?page={{ page - 1 }}{% if current_status %}&status={{ current_status }}{% endif %}" class="btn btn-secondary btn-sm" id="btn-prev-page">&larr; Previous</a>
+      {% endif %}
+      {% if page < total_pages %}
+      <a href="/ui/runs?page={{ page + 1 }}{% if current_status %}&status={{ current_status }}{% endif %}" class="btn btn-secondary btn-sm" id="btn-next-page">Next &rarr;</a>
+      {% endif %}
+    </div>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

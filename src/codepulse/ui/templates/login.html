@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+
+{% block title %}Login — CodePulse AI{% endblock %}
+
+{% block content %}
+<div style="max-width: 440px; margin: 3rem auto;">
+  <div class="card">
+    <div class="card-title">
+      <span>Operator Login</span>
+      <span class="badge badge-high">Protected</span>
+    </div>
+    <p style="color: var(--text-muted); font-size: 0.9rem; margin-bottom: 1.5rem;">
+      Authentication is required to access CodePulse AI management and analysis endpoints.
+    </p>
+
+    <form method="POST" action="/ui/login">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="next" value="{{ next_url or '/ui/analyze' }}">
+
+      <div class="form-group">
+        <label for="password" class="form-label">UI Password</label>
+        <input type="password" id="password" name="password" class="form-control" placeholder="Enter configured UI_PASSWORD" required autofocus>
+      </div>
+
+      <button type="submit" class="btn btn-primary" style="width: 100%;">Sign In</button>
+    </form>
+  </div>
+</div>
+{% endblock %}

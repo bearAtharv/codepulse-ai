@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+
+{% block title %}Run #{{ run.pull_request_number }} Details — CodePulse AI{% endblock %}
+
+{% block content %}
+<div class="card">
+  <div class="card-title">
+    <div>
+      <span>{{ repo.full_name }} #{{ run.pull_request_number }}</span>
+      <span class="badge badge-{{ run.status }}" style="margin-left: 0.5rem;">{{ run.status|upper }}</span>
+    </div>
+    <div style="display: flex; gap: 0.5rem; align-items: center;">
+      {% if trace_id %}
+      <a href="{{ settings.grafana_public_url }}/explore?left=%7B%22datasource%22:%22tempo%22,%22queries%22:%5B%7B%22query%22:%22{{ trace_id }}%22%7D%5D%7D" 
+         target="_blank" rel="noopener" class="btn btn-secondary btn-sm" id="btn-trace-link">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+        </svg>
+        View Distributed Trace ↗
+      </a>
+      {% endif %}
+
+      {% if not run.review_posted_at %}
+      <button id="btn-retry-posting" data-run-id="{{ run.id }}" data-csrf-token="{{ csrf_token }}" class="btn btn-danger btn-sm">
+        Retry Posting Review
+      </button>
+      {% endif %}
+    </div>
+  </div>
+
+  <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; margin-top: 1rem; font-size: 0.85rem;">
+    <div><strong>Run ID:</strong> <code>{{ run.id }}</code></div>
+    <div><strong>Head SHA:</strong> <code>{{ run.head_sha[:10] }}...</code></div>
+    <div><strong>PR Author:</strong> {{ run.pr_author or 'unknown' }}</div>
+    <div><strong>Received:</strong> {{ received_at_formatted }}</div>
+    <div><strong>Duration:</strong> {{ duration_formatted }}</div>
+    <div>
+      <strong>Review Posted:</strong> 
+      {% if run.review_posted_at %}
+        <span class="badge badge-completed">Posted (ID: {{ run.github_review_id or 'Simulated' }})</span>
+      {% else %}
+        <span class="badge badge-pending">Unposted</span>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-title">
+    <span>Deduplicated Findings ({{ findings|length }})</span>
+  </div>
+
+  {% if findings|length == 0 %}
+  <div class="alert alert-success">
+    Zero findings recorded for this analysis run.
+  </div>
+  {% else %}
+  <div style="overflow-x: auto;">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Severity</th>
+          <th>Source</th>
+          <th>Location</th>
+          <th>Category & Title</th>
+          <th>Explanation</th>
+          <th>Remediation</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for f in findings %}
+        <tr>
+          <td>
+            <span class="badge badge-{{ f.severity|lower }}">{{ f.severity|upper }}</span>
+          </td>
+          <td>
+            <span class="badge" style="background: var(--surface-hover);">{{ f.source|upper }}</span>
+          </td>
+          <td>
+            <code>{{ f.file_path }}:{{ f.line_start }}{% if f.line_end > f.line_start %}-{{ f.line_end }}{% endif %}</code>
+          </td>
+          <td>
+            <strong>[{{ f.category }}]</strong> {{ f.title }}
+          </td>
+          <td style="font-size: 0.85rem; color: var(--text-muted); max-width: 320px;">
+            {{ f.explanation }}
+          </td>
+          <td style="font-size: 0.8rem; font-family: ui-monospace, monospace; max-width: 280px;">
+            {% if f.remediation %}
+            <code>{{ f.remediation }}</code>
+            {% else %}
+            <em>N/A</em>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+
+{% if review_body %}
+<div class="card">
+  <div class="card-title">
+    <span>GitHub Review Payload Body</span>
+  </div>
+  <div style="background: var(--surface-hover); border: 1px solid var(--border-color); border-radius: 6px; padding: 1rem;">
+    <pre style="white-space: pre-wrap; font-family: inherit; font-size: 0.875rem;">{{ review_body }}</pre>
+  </div>
+</div>
+{% endif %}
+
+<div style="margin-top: 1rem;">
+  <a href="/ui/runs" class="btn btn-secondary btn-sm">&larr; Back to Recent Runs</a>
+</div>
+{% endblock %}

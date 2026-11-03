@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}CodePulse AI{% endblock %}</title>
+  <link rel="stylesheet" href="/ui/static/style.css">
+</head>
+<body>
+  <header>
+    <nav class="navbar">
+      <a href="/ui/analyze" class="brand">
+        <svg class="brand-icon" viewBox="0 0 24 24">
+          <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+        </svg>
+        <span>CodePulse AI</span>
+      </a>
+      <ul class="nav-links">
+        <li><a href="/ui/analyze" class="{% if active_tab == 'analyze' %}active{% endif %}">Analyze Code</a></li>
+        <li><a href="/ui/simulate" class="{% if active_tab == 'simulate' %}active{% endif %}">Simulate PR</a></li>
+        <li><a href="/ui/runs" class="{% if active_tab == 'runs' %}active{% endif %}">Recent Runs</a></li>
+        <li><a href="{{ settings.grafana_public_url }}" target="_blank" rel="noopener">Grafana ↗</a></li>
+      </ul>
+    </nav>
+  </header>
+
+  <main>
+    {% if error %}
+    <div class="alert alert-danger" role="alert">
+      {{ error }}
+    </div>
+    {% endif %}
+
+    {% if message %}
+    <div class="alert alert-success" role="alert">
+      {{ message }}
+    </div>
+    {% endif %}
+
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer>
+    <div class="footer-content">
+      <div class="footer-info">
+        <strong>CodePulse AI</strong> &bull; v1.1.0-rc1 &bull; Automated Security & Reliability Review
+      </div>
+      <div class="footer-badges">
+        {% if settings.mock_github %}
+        <span class="badge badge-mock">Mock GitHub</span>
+        {% else %}
+        <span class="badge badge-live">Live GitHub</span>
+        {% endif %}
+
+        {% if settings.mock_llm %}
+        <span class="badge badge-mock">Mock LLM</span>
+        {% else %}
+        <span class="badge badge-live">Live Gemini</span>
+        {% endif %}
+        <a href="{{ settings.grafana_public_url }}" target="_blank" rel="noopener" style="color: inherit; text-decoration: underline; margin-left: 0.5rem;">Dashboards</a>
+        <a href="http://127.0.0.1:9092" target="_blank" rel="noopener" style="color: inherit; text-decoration: underline; margin-left: 0.5rem;">Prometheus</a>
+      </div>
+    </div>
+  </footer>
+
+  <script src="/ui/static/app.js"></script>
+</body>
+</html>

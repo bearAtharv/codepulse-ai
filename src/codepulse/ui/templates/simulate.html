@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+
+{% block title %}Simulate PR Review — CodePulse AI{% endblock %}
+
+{% block content %}
+<div class="card">
+  <div class="card-title">
+    <span>Simulate Pull Request Webhook</span>
+    <span class="badge badge-high">End-to-End Pipeline</span>
+  </div>
+  <p style="color: var(--text-muted); font-size: 0.9rem; margin-bottom: 1.25rem;">
+    Trigger an authentic GitHub pull request event into CodePulse AI. The webhook payload is signed with HMAC-SHA256 server-side (keeping secrets secure), accepted asynchronously with HTTP 202, and processed through Celery worker queues, AST analysis, deduplication, and atomic review posting.
+  </p>
+
+  <form method="POST" action="/ui/simulate" id="simulate-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+    <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 1rem;">
+      <div class="form-group">
+        <label for="repo-name" class="form-label">Repository (owner/repo)</label>
+        <input type="text" id="repo-name" name="repo_name" class="form-control" value="{{ repo_name or 'corp-demo/repo-sample' }}" required>
+      </div>
+
+      <div class="form-group">
+        <label for="pr-number" class="form-label">PR Number</label>
+        <input type="number" id="pr-number" name="pr_number" class="form-control" value="{{ pr_number or 101 }}" required min="1">
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label for="diff-text" class="form-label">Unified Diff Content</label>
+      <textarea id="diff-text" name="diff_text" class="form-control code-editor" style="min-height: 180px;">{{ diff_text or 'diff --git a/src/app.py b/src/app.py
+--- a/src/app.py
++++ b/src/app.py
+@@ -1,2 +1,4 @@
++import os
++cursor.execute(f"SELECT * FROM users WHERE id = \'{user_id}\'")
++output = eval(untrusted_payload)
+' }}</textarea>
+    </div>
+
+    <button type="submit" id="btn-simulate-submit" class="btn btn-primary">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <polygon points="5 3 19 12 5 21 5 3"></polygon>
+      </svg>
+      Dispatch Webhook & Monitor Review
+    </button>
+  </form>
+</div>
+
+{% if run_id %}
+<div class="card" id="simulation-progress-container" data-run-id="{{ run_id }}">
+  <div class="card-title">
+    <span>Live Pipeline Execution</span>
+    <span id="sim-status-badge" class="badge badge-{{ initial_status or 'pending' }}">{{ (initial_status or 'pending')|upper }}</span>
+  </div>
+
+  <div style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 1rem;">
+    <span>Analysis Run ID: <code>{{ run_id }}</code></span> &bull; 
+    <span>Delivery ID: <code>{{ delivery_id }}</code></span>
+  </div>
+
+  <div id="sim-progress-bar" style="margin-bottom: 1.5rem; {% if initial_status in ['completed', 'failed'] %}display: none;{% endif %}">
+    <div style="height: 6px; width: 100%; background: var(--surface-hover); border-radius: 3px; overflow: hidden;">
+      <div style="height: 100%; width: 65%; background: var(--primary); animation: pulse 1.5s infinite ease-in-out;"></div>
+    </div>
+    <p style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0.4rem;">
+      Processing PR diff chunks across Celery queues (orchestration &rarr; AST & LLM chord &rarr; deduplication &rarr; review posting)...
+    </p>
+  </div>
+
+  <div id="sim-results-card" style="{% if initial_status not in ['completed', 'failed'] %}display: none;{% endif %}">
+    <h3 style="font-size: 1.05rem; margin-bottom: 0.75rem;">GitHub Review Summary</h3>
+    <div style="background: var(--surface-hover); border: 1px solid var(--border-color); border-radius: 6px; padding: 1rem; margin-bottom: 1.25rem;">
+      <pre id="sim-review-body" style="white-space: pre-wrap; font-family: inherit; font-size: 0.9rem;">{{ initial_review_summary or 'Review summary will appear once analysis completes...' }}</pre>
+    </div>
+
+    <h3 style="font-size: 1.05rem; margin-bottom: 0.75rem;">Posted Inline Comments</h3>
+    <ul id="sim-inline-comments" style="list-style: none; margin-bottom: 1.25rem;">
+      {% if initial_comments %}
+        {% for c in initial_comments %}
+        <li style="border: 1px solid var(--border-color); border-radius: 6px; padding: 0.75rem; margin-bottom: 0.5rem; background: var(--surface-color);">
+          <strong>{{ c.path }}:{{ c.line }}</strong> ({{ c.side|default('RIGHT') }}):<br>
+          <pre style="margin-top: 0.35rem; font-size: 0.85rem; white-space: pre-wrap;">{{ c.body }}</pre>
+        </li>
+        {% endfor %}
+      {% else %}
+        <li><em>Polling for comments...</em></li>
+      {% endif %}
+    </ul>
+
+    <a id="sim-details-link" href="/ui/runs/{{ run_id }}" class="btn btn-secondary btn-sm">
+      View Complete Run Telemetry & Trace &rarr;
+    </a>
+  </div>
+</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,146 @@
+{% extends "base.html" %}
+
+{% block title %}Analyze Code — CodePulse AI{% endblock %}
+
+{% block content %}
+<div class="card">
+  <div class="card-title">
+    <span>Interactive Code Analyzer</span>
+    <span class="badge badge-low">In-Memory Static & LLM Analysis</span>
+  </div>
+  <p style="color: var(--text-muted); font-size: 0.9rem; margin-bottom: 1rem;">
+    Submit source code for immediate analysis against OWASP Top 10 security vulnerabilities and reliability risks. Analysis is evaluated in-process; submitted code is never stored to disk, database, or logs.
+  </p>
+
+  <div class="sample-bar">
+    <span style="font-size: 0.85rem; font-weight: 600; color: var(--text-muted);">Try Sample:</span>
+    <button type="button" class="sample-btn" data-sample="sqli">SQL Injection</button>
+    <button type="button" class="sample-btn" data-sample="eval">Code Eval</button>
+    <button type="button" class="sample-btn" data-sample="secret">Hardcoded Secret</button>
+    <button type="button" class="sample-btn" data-sample="xss">innerHTML XSS</button>
+  </div>
+
+  <form method="POST" action="/ui/analyze" enctype="multipart/form-data" id="analyze-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+    <div class="form-group">
+      <label for="code-input" class="form-label">Source Code (max 200 KB)</label>
+      <textarea id="code-input" name="code" class="form-control code-editor" placeholder="Paste Python, JavaScript, or TypeScript source code here...">{{ submitted_code or '' }}</textarea>
+    </div>
+
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 1rem;">
+      <div class="form-group" style="margin-bottom: 0;">
+        <label for="code-file" class="form-label">Or Upload File (.py, .js, .jsx, .ts, .tsx)</label>
+        <input type="file" id="code-file" name="file" class="form-control" accept=".py,.js,.jsx,.ts,.tsx">
+      </div>
+
+      <div class="form-group" style="margin-bottom: 0;">
+        <label for="language-select" class="form-label">Language</label>
+        <select id="language-select" name="language" class="form-select">
+          <option value="auto" {% if selected_language == 'auto' or not selected_language %}selected{% endif %}>Auto-detect</option>
+          <option value="python" {% if selected_language == 'python' %}selected{% endif %}>Python</option>
+          <option value="javascript" {% if selected_language == 'javascript' %}selected{% endif %}>JavaScript</option>
+          <option value="typescript" {% if selected_language == 'typescript' %}selected{% endif %}>TypeScript</option>
+        </select>
+      </div>
+
+      <div class="form-group checkbox-group" style="margin-bottom: 0; padding-top: 1.75rem;">
+        <input type="checkbox" id="use-ai" name="use_ai" value="true" {% if use_ai %}checked{% endif %}>
+        <label for="use-ai" class="form-label" style="margin-bottom: 0; cursor: pointer;">
+          Use AI {% if settings.mock_llm %}(mock){% else %}(Gemini){% endif %}
+        </label>
+      </div>
+    </div>
+
+    <button type="submit" id="btn-analyze-submit" class="btn btn-primary">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="11" cy="11" r="8"></circle>
+        <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+      </svg>
+      Run Security Analysis
+    </button>
+  </form>
+</div>
+
+{% if analyzed %}
+<div class="card" id="analysis-results">
+  <div class="card-title">
+    <span>Analysis Findings ({{ findings|length }})</span>
+    <span style="font-size: 0.85rem; color: var(--text-muted);">Language: <strong>{{ detected_lang|upper }}</strong> &bull; Deduplicated & Ranked</span>
+  </div>
+
+  <div class="stat-grid">
+    <div class="stat-box">
+      <div class="stat-value" style="color: var(--text-main);">{{ findings|length }}</div>
+      <div class="stat-label">Total</div>
+    </div>
+    <div class="stat-box">
+      <div class="stat-value" style="color: var(--sev-critical);">{{ sev_counts.critical }}</div>
+      <div class="stat-label">Critical</div>
+    </div>
+    <div class="stat-box">
+      <div class="stat-value" style="color: var(--sev-high);">{{ sev_counts.high }}</div>
+      <div class="stat-label">High</div>
+    </div>
+    <div class="stat-box">
+      <div class="stat-value" style="color: var(--sev-medium);">{{ sev_counts.medium }}</div>
+      <div class="stat-label">Medium</div>
+    </div>
+    <div class="stat-box">
+      <div class="stat-value" style="color: var(--sev-low);">{{ sev_counts.low }}</div>
+      <div class="stat-label">Low</div>
+    </div>
+  </div>
+
+  {% if findings|length == 0 %}
+  <div class="alert alert-success" style="margin-bottom: 1rem;">
+    ✓ No security vulnerabilities or reliability issues identified. Clean code!
+  </div>
+  {% else %}
+  <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 1rem;">
+    💡 Tip: Click any finding card below to jump to and highlight the corresponding line in the code viewer.
+  </p>
+  {% endif %}
+
+  <div class="layout-split">
+    <!-- Findings Column -->
+    <div class="findings-column" style="max-height: 520px; overflow-y: auto;">
+      {% for f in findings %}
+      <div class="finding-card" data-line="{{ f.line_start }}" id="finding-item-{{ loop.index }}">
+        <div class="finding-header">
+          <span class="badge badge-{{ f.severity|lower }}">{{ f.severity|upper }}</span>
+          <span style="font-size: 0.8rem; color: var(--text-muted);">
+            Line {{ f.line_start }}{% if f.line_end > f.line_start %}-{{ f.line_end }}{% endif %}
+            &bull; <span class="badge" style="background: var(--surface-hover);">{{ f.source|upper }}</span>
+          </span>
+        </div>
+        <div class="finding-title">[{{ f.category }}] {{ f.title }}</div>
+        <p style="font-size: 0.85rem; color: var(--text-muted); margin: 0.4rem 0;">{{ f.explanation }}</p>
+        {% if f.remediation %}
+        <div class="finding-remediation">
+          <strong>Remediation:</strong> {{ f.remediation }}
+        </div>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+
+    <!-- Code Viewer Column -->
+    <div class="code-column">
+      <div class="code-viewer-container">
+        <div class="code-line-numbers">
+          {% for line in code_lines %}
+          <div>{{ loop.index }}</div>
+          {% endfor %}
+        </div>
+        <div class="code-content">
+          {% for line in code_lines %}
+          <span class="code-line {% if loop.index in flagged_lines %}flagged{% endif %}" id="code-line-{{ loop.index }}">{{ line or ' ' }}</span>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endif %}
+{% endblock %}
