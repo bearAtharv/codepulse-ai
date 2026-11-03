@@ -33,6 +33,13 @@ class Settings(BaseSettings):
     environment: str = "development"
     admin_api_key: str | None = None
 
+    # ── Web UI & Security ───────────────────────────────────────────────────────
+    ui_enabled: bool = True
+    ui_password: str | None = None
+    ui_session_secret: str = "dev_ui_session_secret_change_in_production"
+    grafana_public_url: str = "http://127.0.0.1:3000"
+    tempo_public_url: str = "http://127.0.0.1:3200"
+
     # ── Mock modes (for local/test without real external APIs) ──────────────────
     mock_github: bool = True
     mock_llm: bool = True
@@ -86,6 +93,12 @@ def validate_settings(settings: Settings) -> None:
                 "Refusing to start: default hardcoded PostgreSQL password ('codepulse_dev') "
                 "cannot be used when MOCK_GITHUB=false or ENVIRONMENT != development."
             )
+        if settings.ui_enabled:
+            if not settings.ui_password or not settings.ui_password.strip() or settings.ui_password in ("change_me_ui_password", "placeholder"):
+                raise ValueError(
+                    "Refusing to start: UI_PASSWORD is required when UI is enabled and "
+                    "ENVIRONMENT != development or MOCK_GITHUB=false."
+                )
 
     if not settings.mock_llm:
         if not settings.gemini_api_key or settings.gemini_api_key.strip() in ("", "placeholder", "your_gemini_api_key_here"):

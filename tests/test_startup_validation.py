@@ -95,6 +95,39 @@ def test_startup_succeeds_in_live_mode_with_all_secrets_set():
         github_webhook_secret="prod_webhook_secret_super_secret_456",
         admin_api_key="prod_admin_api_key_789",
         database_url="postgresql://codepulse:super_strong_prod_pass@prod-db:5432/codepulse",
+        ui_password="super_strong_ui_password_123",
+    )
+    # Should not raise
+    validate_settings(settings)
+
+
+def test_startup_refuses_when_ui_enabled_without_ui_password_in_production():
+    """Startup must be refused if Web UI is enabled without UI_PASSWORD in non-dev or live mode."""
+    settings = Settings(
+        environment="production",
+        mock_github=False,
+        mock_llm=True,
+        github_webhook_secret="prod_webhook_secret_super_secret_456",
+        admin_api_key="prod_admin_api_key_789",
+        database_url="postgresql://codepulse:super_strong_prod_pass@prod-db:5432/codepulse",
+        ui_enabled=True,
+        ui_password=None,
+    )
+    with pytest.raises(ValueError, match="UI_PASSWORD is required when UI is enabled"):
+        validate_settings(settings)
+
+
+def test_startup_allowed_when_ui_disabled_without_ui_password():
+    """Startup must be allowed without UI_PASSWORD if UI_ENABLED=false."""
+    settings = Settings(
+        environment="production",
+        mock_github=False,
+        mock_llm=True,
+        github_webhook_secret="prod_webhook_secret_super_secret_456",
+        admin_api_key="prod_admin_api_key_789",
+        database_url="postgresql://codepulse:super_strong_prod_pass@prod-db:5432/codepulse",
+        ui_enabled=False,
+        ui_password=None,
     )
     # Should not raise
     validate_settings(settings)

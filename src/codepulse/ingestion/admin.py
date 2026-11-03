@@ -69,13 +69,8 @@ def verify_admin_auth(
         )
 
 
-@router.post("/retry-posting/{analysis_run_id}")
-def retry_posting(
-    analysis_run_id: str,
-    db: Session = Depends(get_db_session),
-    _: None = Depends(verify_admin_auth),
-) -> JSONResponse:
-    """Retry posting an unposted review to GitHub using durably stored review payload."""
+def execute_retry_posting(analysis_run_id: str, db: Session) -> dict[str, Any]:
+    """Internal implementation of retry posting logic for admin API and web UI."""
     try:
         run_uuid = uuid.UUID(analysis_run_id)
     except ValueError:
@@ -141,13 +136,9 @@ def retry_posting(
         )
     except Exception as exc:
         logger.error("Admin retry posting failed for %s#%d: %s", repo.full_name, pr_number, exc)
-        return JSONResponse(
+        raise HTTPException(
             status_code=502,
-            content={
-                "status": "error",
-                "message": f"GitHub API review posting failed: {exc}",
-                "analysis_run_id": str(run_uuid),
-            },
+            detail=f"GitHub API review posting failed: {exc}",
         )
 
     # 4. Success: update AnalysisRun and mark DeadLetterLog resolved
@@ -197,12 +188,32 @@ def retry_posting(
         repo.full_name,
         pr_number,
     )
-    return JSONResponse(
-        status_code=200,
-        content={
-            "status": "success",
-            "github_review_id": review_id,
-            "analysis_run_id": str(run_uuid),
-            "review_posted_at": now.isoformat(),
-        },
-    )
+    return {
+        "status": "success",
+        "github_review_id": review_id,
+        "analysis_run_id": str(run_uuid),
+        "review_posted_at": now.isoformat(),
+    }
+
+
+@router.post("/retry-posting/{analysis_run_id}")
+def retry_posting(
+    analysis_run_id: str,
+    db: Session = Depends(get_db_session),
+    _: None = Depends(verify_admin_auth),
+) -> JSONResponse:
+    """Retry posting an unposted review to GitHub using durably stored review payload."""
+    try:
+        result = execute_retry_posting(analysis_run_id, db)
+        return JSONResponse(status_code=200, content=result)
+    except HTTPException as exc:
+        if exc.status_code == 502:
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "status": "error",
+                    "message": exc.detail,
+                    "analysis_run_id": analysis_run_id,
+                },
+            )
+        raise
