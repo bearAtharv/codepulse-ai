@@ -2,6 +2,27 @@
 
 All notable changes to CodePulse AI are documented here.
 
+## [1.1.0-rc1] — 2026-11-03
+
+### Added
+- **Interactive Server-Rendered Web UI & Operator Portal (`/ui`) (DEC-028)**:
+  - **Architecture & Serving**: Built with Jinja2 server-rendered templates, vanilla JavaScript, and responsive system light/dark theme CSS. Hosted directly on the existing FastAPI service under `/ui` with zero external CDN dependencies and zero Node.js build steps.
+  - **Interactive Code Analyzer (`/ui/analyze`)**: Immediate in-process static AST analysis and optional mock/live Gemini analysis for Python, JavaScript, and TypeScript snippets or uploaded files (`.py`, `.js`, `.jsx`, `.ts`, `.tsx`, limit 200 KB). Displays findings sorted by severity with explanations, remediations, code viewer with line numbers, flagged lines, and clickable findings that scroll to line.
+  - **Zero Code Persistence Guarantee**: Submitted source code on `/ui/analyze` is evaluated strictly in-process and is never written to disk, PostgreSQL, or Redis, and is strictly excluded from logging and distributed tracing.
+  - **PR Webhook Simulator (`/ui/simulate`)**: Trigger authentic pull request reviews through the real `/webhooks` pipeline. Signs payloads server-side using HMAC-SHA256 (keeping secrets safe), polls status via `/ui/api/runs/{id}`, and renders real-time pipeline execution progress, posted review summary, and inline comments.
+  - **Recent Runs Telemetry Table (`/ui/runs`)**: Paginated table (50 runs per page) of historical analysis runs with status filtering, duration, timestamp, and severity breakdown badges.
+  - **Run Telemetry Details (`/ui/runs/{id}`)**: Detailed run view with deduplicated findings (AST/LLM/merged), review body from Redis or `dead_letter_log`, direct one-click Grafana/Tempo distributed trace links, and a server-side "Retry Posting Review" button for unposted reviews.
+  - **Security & Authentication Boundary**:
+    - Dev mode (`ENVIRONMENT=development` and `MOCK_GITHUB=true`) binds to loopback (`127.0.0.1`) without mandatory credentials.
+    - Non-dev mode or live GitHub mode (`MOCK_GITHUB=false`) enforces `UI_PASSWORD` with constant-time verification, tamper-proof HMAC-SHA256 session cookies (`HttpOnly`, `SameSite=Strict`, `Secure`), CSRF token validation on POST forms, and IP rate limiting (max 5 login attempts/min, max 30 analyze requests/min).
+    - Hardened security headers: `Content-Security-Policy`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: strict-origin-when-cross-origin`.
+    - Entire UI toggleable via `UI_ENABLED=false` (returns 404).
+    - Excluded from default Kubernetes Ingress routes in Helm chart to ensure internal-only isolation.
+  - **Testing & Visual Proof**:
+    - 15 FastAPI TestClient unit/integration tests covering all UI endpoints, XSS escaping, CSRF validation, rate limiting, and size boundaries.
+    - End-to-end browser proof test suite with Playwright (`tests/test_ui_e2e.py`) capturing 4 verified screenshots in `docs/screenshots/` (`analyze-results.png`, `simulate-completed.png`, `runs-list.png`, `run-details.png`).
+  - **Test Suite Growth**: Full test suite now **417 tests** passing.
+
 ## [1.0.0-rc2] — 2026-11-02
 
 ### Fixed

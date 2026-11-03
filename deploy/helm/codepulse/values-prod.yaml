@@ -44,6 +44,8 @@ workers:
 beat:
   replicaCount: 1
 
+# Production Ingress configuration (§8.2)
+# Internal endpoints (/metrics, /admin, and /ui) are NOT exposed through Ingress.
 ingress:
   enabled: true
   className: "nginx"

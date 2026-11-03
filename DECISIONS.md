@@ -704,6 +704,39 @@ Reviewing these requirements against production realities and upstream ecosystem
 4. **Validation Scope:**
    - The chart is verified through static analysis (`helm lint`), template rendering against default and production configurations (`helm template`), and strict schema validation (`kubeconform` with upstream Kubernetes and KEDA CRD schemas). It is documented as lint- and schema-verified only, without deployment to a live cluster.
 
+---
+
+## DEC-028: Server-Rendered Web UI Architecture & Security Boundary
+
+**Context:**
+A human operator or evaluator requires a lightweight, interactive web interface to explore CodePulse AI capabilities directly in a browser:
+1. Submitting ad-hoc source code snippets or files for immediate security analysis.
+2. Simulating end-to-end pull request webhook events through the live Celery pipeline and monitoring real-time review progress.
+3. Inspecting recent analysis runs, deduplicated findings, posted review bodies, and distributed traces.
+4. Triggering administrative review re-posting when GitHub API delivery has stalled.
+
+Alternative architectures considered:
+- **Single Page Application (SPA) in React/Vue/Svelte**: Would require a Node.js build toolchain (Vite/npm), package management, additional containers/Nginx serving, external CDN dependencies, and extensive CORS/API token exposure.
+- **Server-Rendered Templates (Jinja2 + Vanilla JS)**: Hosted directly by the existing FastAPI `codepulse-web` application with zero Node.js build dependencies, zero CDN requests, and minimal attack surface.
+
+**Decision:**
+Adopted server-rendered HTML templates via `Jinja2` with lightweight vanilla JavaScript and responsive CSS adhering to system light/dark color preferences.
+
+Key architectural boundaries:
+1. **Serving & Bundling:** All templates are located in `src/codepulse/ui/templates/` and static assets in `src/codepulse/ui/static/`. All CSS and JS are locally hosted; no external CDN links or font dependencies are permitted.
+2. **Zero Code Persistence:** On `/ui/analyze`, submitted source code is evaluated strictly in-process. Source code is never written to disk, PostgreSQL, or Redis, and is strictly excluded from logging and distributed tracing. Input is limited to 200 KB and restricted to supported extensions (`.py`, `.js`, `.jsx`, `.ts`, `.tsx`).
+3. **Webhook Simulation Boundary:** On `/ui/simulate`, the client never receives the `GITHUB_WEBHOOK_SECRET`. Payloads are signed server-side using HMAC-SHA256 and dispatched directly through the application's ASGI pipeline into the standard `/webhooks` handler, exercising the authentic Celery orchestration chord, AST/LLM analysis, and review posting pipelines.
+4. **Authentication & Session Security:**
+   - In development mode (`ENVIRONMENT=development` and `MOCK_GITHUB=true`), the UI binds to loopback (`127.0.0.1`) without mandatory credentials.
+   - In non-development environments or when `MOCK_GITHUB=false`, `UI_PASSWORD` is mandatory at startup. Passwords are validated using constant-time comparison (`hmac.compare_digest`). Sessions use tamper-proof HMAC-SHA256 tokens in `HttpOnly`, `SameSite=Strict`, `Secure` cookies.
+   - All POST mutations enforce session-bound CSRF tokens.
+   - Login attempts are rate-limited to 5 attempts/minute per IP; analyze requests are limited to 30 requests/minute per IP.
+5. **Content Security Policy & Headers:** All UI responses strictly enforce `Content-Security-Policy: default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none';`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, and `Referrer-Policy: strict-origin-when-cross-origin`.
+6. **Kubernetes Ingress Boundary:** The `/ui` prefix is intentionally excluded from the default Helm Ingress routes (`deploy/helm/codepulse/values.yaml` and `values-prod.yaml`). In Kubernetes, `/ui` remains internal-only, matching `/admin` and `/metrics`.
+
+**Impact:**
+Provides an intuitive, zero-dependency browser portal for security evaluation while maintaining complete isolation, zero secret leakage, and backward compatibility with all existing public interfaces and database schemas.
+
 
 
 

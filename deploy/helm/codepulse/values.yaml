@@ -159,7 +159,8 @@ keda:
   cooldownPeriod: 300 # §4.4: 5-minute stabilization window to prevent thrashing
 
 # Ingress configuration: EXPOSES ONLY /webhooks AND /health (§8.2)
-# Internal endpoints (/metrics, /admin) are strictly disallowed on the Ingress!
+# Internal endpoints (/metrics, /admin, and /ui) are strictly disallowed on the Ingress by default!
+# Web UI is internal-only; do NOT expose /ui publicly without authentication and network controls.
 ingress:
   enabled: true
   className: "nginx"

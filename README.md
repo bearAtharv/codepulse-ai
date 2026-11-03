@@ -19,6 +19,7 @@ flowchart TD
 
     subgraph Ingestion ["Ingestion Tier (FastAPI)"]
         WEB["codepulse-web :8000\n- Signature Verification (HMAC-SHA256)\n- Redis Idempotency (SET NX)\n- DB Run Tracking"]
+        UI["Web UI :8000/ui\n- Interactive Code Analyzer\n- PR Webhook Simulator\n- Recent Runs & Telemetry\n- Zero Persistence of Code"]
         ADMIN["Admin API\n- /admin/retry-posting\n- Token Protected"]
     end
 
@@ -165,11 +166,59 @@ flowchart TD
 
 ---
 
+## Web UI & Operator Portal
+
+CodePulse AI provides a built-in browser interface served directly by the FastAPI web service under `/ui`. It is built with server-rendered Jinja2 templates, clean responsive CSS supporting system light/dark appearance, and vanilla JavaScript without any Node.js build steps or external CDN dependencies.
+
+### 4-Panel Visual Overview
+
+| 1. Interactive Code Analyzer | 2. Pull Request Webhook Simulator |
+| :---: | :---: |
+| [![Interactive Code Analyzer](docs/screenshots/analyze-results.png)](docs/screenshots/analyze-results.png) | [![Pull Request Simulator](docs/screenshots/simulate-completed.png)](docs/screenshots/simulate-completed.png) |
+| **3. Recent Runs & Telemetry Portal** | **4. Run Telemetry & Trace Details** |
+| [![Recent Runs Table](docs/screenshots/runs-list.png)](docs/screenshots/runs-list.png) | [![Run Details & Distributed Trace](docs/screenshots/run-details.png)](docs/screenshots/run-details.png) |
+
+### Pages & Capabilities
+
+1. **Interactive Code Analyzer (`/ui/analyze`)**
+   - **URL:** [http://127.0.0.1:8000/ui/analyze](http://127.0.0.1:8000/ui/analyze)
+   - **Purpose:** Submit ad-hoc Python, JavaScript, or TypeScript snippets via text input or file upload (`.py`, `.js`, `.jsx`, `.ts`, `.tsx`, limit 200 KB).
+   - **Analysis:** Executes deterministic tree-sitter AST heuristics in-process with an optional checkbox for AI review via Gemini (`MockLLMClient` or real Gemini).
+   - **Interactive View:** Displays deduplicated findings ranked by severity, explanations, concrete remediation steps, code viewer with line numbers, flagged lines, and clickable cards that scroll and highlight the affected code line.
+   - **Zero Persistence Guarantee:** Submitted source code is processed strictly in memory and is **never written to disk, PostgreSQL, or Redis**, and is omitted from logs and traces.
+
+2. **Pull Request Review Simulator (`/ui/simulate`)**
+   - **URL:** [http://127.0.0.1:8000/ui/simulate](http://127.0.0.1:8000/ui/simulate)
+   - **Purpose:** Test and demo the end-to-end pull request analysis workflow from a web browser.
+   - **Pipeline Execution:** Generates an authentic GitHub `pull_request` webhook payload, signs it server-side using HMAC-SHA256 (the secret is never exposed to the client), and dispatches it directly into the `/webhooks` ingestion pipeline.
+   - **Real-Time Polling:** Polls `/ui/api/runs/{id}` to display live pipeline transitions (`PENDING` &rarr; `RUNNING` &rarr; `COMPLETED`), posted review summaries, and inline comments.
+
+3. **Recent Runs Table (`/ui/runs`)**
+   - **URL:** [http://127.0.0.1:8000/ui/runs](http://127.0.0.1:8000/ui/runs)
+   - **Purpose:** Central operator view listing recent analysis runs across all repositories.
+   - **Features:** Paginated table (50 runs/page), filterable by execution status (`completed`, `pending`, `failed`), showing PR numbers, severity counters (`Critical`, `High`, `Medium`, `Low`), execution durations, and timestamps.
+
+4. **Run Telemetry Details (`/ui/runs/{id}`)**
+   - **URL:** [http://127.0.0.1:8000/ui/runs/{id}](http://127.0.0.1:8000/ui/runs)
+   - **Purpose:** Deep-dive into an individual analysis run's telemetry.
+   - **Features:** Complete deduplicated findings table (AST, LLM, or merged), full GitHub review markdown payload from durable storage, and direct one-click links to Grafana Tempo distributed trace graphs. If review posting was interrupted, includes a server-side "Retry Posting Review" action.
+
+### Web UI Security Architecture (DEC-028)
+
+- **Loopback Dev Binding:** In development mode (`ENVIRONMENT=development` and `MOCK_GITHUB=true`), the UI binds to `127.0.0.1:8000` without mandatory login credentials.
+- **Operator Authentication:** In non-development environments or when `MOCK_GITHUB=false`, `UI_PASSWORD` is strictly enforced. Passwords are verified using constant-time comparison (`hmac.compare_digest`), sessions are secured via HMAC-SHA256 tokens stored in `HttpOnly`, `SameSite=Strict`, `Secure` cookies, and login attempts are rate-limited to 5 per minute per IP.
+- **CSRF & Rate Limiting:** All POST actions validate session-bound CSRF tokens. The analyzer endpoint enforces a 30 req/min per IP rate limit and rejects inputs exceeding 200 KB.
+- **Content Security Policy:** Strict HTTP response headers are attached to all `/ui` routes: `Content-Security-Policy: default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none';`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, and `Referrer-Policy: strict-origin-when-cross-origin`.
+- **Ingress Isolation:** In the Helm deployment, `/ui` is **excluded from public Ingress routes by default** (internal-only alongside `/admin` and `/metrics`).
+
+---
+
 ## System Implementation & Verification Status
 
 | Subsystem / Feature | Implemented | Verified with Mocks | Verified Live | Status / Architecture Notes |
 | :--- | :---: | :---: | :---: | :--- |
 | **Ingestion Service (FastAPI)** | ✅ | ✅ | 🔲 | HMAC-SHA256 signature verification, idempotency locks, repo upsert. Live GitHub delivery pending. |
+| **Interactive Web UI & Portal** | ✅ | ✅ | N/A | Server-rendered Jinja2 interface at `/ui` with in-memory code analyzer, PR simulation monitor, paginated runs, and trace telemetry. Verified with mocks and Playwright browser tests. |
 | **AST Analysis Engine (tree-sitter)** | ✅ | ✅ | N/A | 17 heuristic rules across Python and JavaScript/TypeScript. Deterministic AST parsing. |
 | **LLM Analysis Engine (Gemini)** | ✅ | ✅ | 🔲 | Structured output via `google-genai` SDK and `MockLLMClient`. Live Gemini API credentials pending. |
 | **Deduplication & Ranking** | ✅ | ✅ | N/A | Deduplication on `(file, line, category, family)`. 256 finding cap preserving all criticals. |
